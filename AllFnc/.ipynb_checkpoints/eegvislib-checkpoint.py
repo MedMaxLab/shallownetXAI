@@ -1,19 +1,14 @@
 import numpy as np
 import pandas as pd
-import math
-import random
-import pickle
 import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
-from matplotlib import gridspec
 import mne
 import seaborn as sns
 from scipy.stats import gaussian_kde, linregress, pearsonr, norm
-from scipy.io import loadmat
 from scipy.signal import welch, freqz
 from statsmodels.stats import multitest
 import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
 from matplotlib.lines import Line2D
 from matplotlib.colors import ListedColormap
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -79,8 +74,53 @@ def out_activation(model, target_layer, input_data):
 ###################################
 ####     EXTRACT PSD LIMITS     ###
 ###################################
+def data_transform(data, norm):
+    """
+    Transforms data based on a specified normalization type.
 
-def get_vlim(input_tensor, sampling_rate, frequency_limits):
+    Parameters:
+    -----------
+    - data (float, int, np.ndarray, or torch.Tensor): 
+        The input data to transform. This could be a single numeric value, a numpy array, or a PyTorch tensor.
+    - norm (str): The normalization type. Options are:
+        - 'log10': Applies `log10(data)`.
+        - '10log10': Applies `10 * log10(data)`.
+        - 'linear': Returns the data as-is without transformation.
+
+    Returns:
+    --------
+    - data (float, int, np.ndarray, or torch.Tensor): 
+        Transformed data based on the specified norm.
+
+    Raises:
+    -------
+    ValueError: If norm is not one of 'log10', '10log10', or 'linear'.
+    TypeError: If data is not a numeric value, numpy array, or torch tensor.
+    """
+    
+    # Check if data is of a valid type
+    if not isinstance(data, (int, float, np.ndarray, torch.Tensor)) and not isinstance(data, np.generic):
+        raise TypeError("Data must be a numeric value, numpy array, or torch tensor.")
+    
+    # Apply transformations based on the normalization type
+    if norm == 'log10':
+        if isinstance(data, torch.Tensor):
+            data = torch.log10(data)
+        else:
+            data = np.log10(data)
+    elif norm == '10log10':
+        if isinstance(data, torch.Tensor):
+            data = 10 * torch.log10(data)
+        else:
+            data = 10 * np.log10(data)
+    elif norm == 'linear':
+        return data  # Return the linear data without modification
+    else:
+        raise ValueError("Invalid norm type. Expected 'log10', '10log10', or 'linear'.")
+
+    return data
+
+def get_vlim(input_tensor, sampling_rate, frequency_limits, norm):
     """
     Calculate the minimum and maximum power spectral density (PSD) values across a specific frequency range
     for each sample in the input tensor, returning these limits in dB.
@@ -93,7 +133,7 @@ def get_vlim(input_tensor, sampling_rate, frequency_limits):
 
     Returns:
     --------
-    - tuple: (min_psd_dB, max_psd_dB) indicating the global minimum and maximum PSD values in dB 
+    - psd_limits (tuple): (min_psd, max_psd) indicating the global minimum and maximum PSD values 
     across the specified frequency range.
     """
 
@@ -132,9 +172,9 @@ def get_vlim(input_tensor, sampling_rate, frequency_limits):
         global_psd_max = max(global_psd_max, local_max_psd)
         global_psd_min = min(global_psd_min, local_min_psd)
     
-    # Convert the PSD limits to dB
-    psd_limits_dB = (10*np.log10(global_psd_min), 10*np.log10(global_psd_max))
-    return psd_limits_dB
+    # Convert the PSD limits
+    psd_limits = (data_transform(global_psd_min, norm), data_transform(global_psd_max, norm))
+    return psd_limits
 
 def get_vlimscalp(full_batch_tensor, batch_tensor, sampling_rate, freq_range, num_bands, spec_dict):
     """
@@ -153,7 +193,7 @@ def get_vlimscalp(full_batch_tensor, batch_tensor, sampling_rate, freq_range, nu
 
     Returns:
     --------
-    - np.ndarray: Array of shape (num_bands, 2) where each row contains the min and max PSD values (in dB)
+    - psd_limits (np.ndarray): Array of shape (num_bands, 2) where each row contains the min and max PSD values (in dB)
     for a band.
     
     Notes:
@@ -176,17 +216,17 @@ def get_vlimscalp(full_batch_tensor, batch_tensor, sampling_rate, freq_range, nu
     if spec_dict['vlim'] == 'band':
         # Compute individual limits for each specified band across the full tensor
         for band_idx in range(num_bands):
-            psd_limits[band_idx, :] = get_vlim(full_batch_tensor, sampling_rate, spec_dict['bands'][band_keys[band_idx]])
+            psd_limits[band_idx, :] = get_vlim(full_batch_tensor, sampling_rate, spec_dict['bands'][band_keys[band_idx]], spec_dict['lognorm'])
 
     elif spec_dict['vlim'] == 'all':
         # Calculate global PSD limits across the entire frequency range for all bands
-        global_limits    = get_vlim(full_batch_tensor, sampling_rate, freq_range)
+        global_limits    = get_vlim(full_batch_tensor, sampling_rate, freq_range, spec_dict['lognorm'])
         psd_limits[:, 0] = global_limits[0] * np.ones(num_bands)
         psd_limits[:, 1] = global_limits[1] * np.ones(num_bands)
 
     elif spec_dict['vlim'] == 'batchID':
         # Calculate PSD limits for the specific batch tensor across the entire frequency range
-        batch_limits     = get_vlim(batch_tensor, sampling_rate, freq_range)
+        batch_limits     = get_vlim(batch_tensor, sampling_rate, freq_range, spec_dict['lognorm'])
         psd_limits[:, 0] = batch_limits[0] * np.ones(num_bands)
         psd_limits[:, 1] = batch_limits[1] * np.ones(num_bands)
 
@@ -358,16 +398,16 @@ def scalp_plot(input_window,
 
     Parameters:
     -----------
-    - input_window (torch.Tensor): The input tensor containing the data (e.g., EEG signals).
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - inout_labels (list): A list containing input and output labels for each batch index.
-    - batch_ID (int or list of int): The batch index (or list of batch indices) for which the PSD
-    should be plotted.
+    - inout_labels (list of lists): A list containing true and predicted labels for all the samples in input_window.
+    - batch_ID (int): Index of the batch to analyze.
 
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the scalp plots.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
     
     # Ensure that batch_ID is a scalar if it's provided as a list
@@ -406,7 +446,7 @@ def scalp_plot(input_window,
     # Loop through each frequency band to plot its topographic map and PSD
     for j in range(num_freqs):
         # Extract the PSD data for the current frequency band
-        data_vector = 10*np.log10(Pxx[f_index[j], :]).T
+        data_vector = data_transform(Pxx[f_index[j], :],spec_dict['lognorm']).T
         evoked_data = mne.EvokedArray(data_vector[:, np.newaxis], info)
         evoked_data.set_montage(montage)
 
@@ -421,10 +461,11 @@ def scalp_plot(input_window,
         # Set up the colorbar
         ax[2 * j + 1].set_yticks(np.linspace(lims[j, 0], lims[j, 1], spec_dict['cbartick']))
         ax[2 * j + 1].tick_params(labelsize=spec_dict['font'] - 4)
-        ax[2 * j + 1].set_title('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 4)
+        ax[2 * j + 1].set_title('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 4) #TO DO (UNIT BASED ON LOGNORM)
 
         # Set up the topography
         ax[2 * j].set_title(f'{band_dict[j]} @{f[f_index[j]]:.1f}Hz', fontsize=spec_dict['font'])
+        
         for text in ax[2 * j].texts:
             text.set_fontsize(spec_dict['font'] - 8)
             text.set_fontweight('bold')
@@ -456,7 +497,7 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
 
     Returns:
     --------
-    - ax (matplotlib.axes.Axes): The axes with the plotted data.
+    - ax (matplotlib.axes.Axes): The axes containing the plot.
     """
     
     # Create title string with all channel names
@@ -493,19 +534,21 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
 def temporalFM_PSD(input_window, 
                    Mdl, layer,  
                    spec_dict, inout_labels,
-                   chan_ID, batch_ID=0, FM_ID=None):
+                   chan_ID, batch_ID, FM_ID=None):
     """
     Plot the Power Spectral Density (PSD) of input vs feature map (FM) from a model layer.
     This function compares the PSD of the input and feature map signals for specified channels.
 
     Parameters:
     -----------
-    - input_window (torch.Tensor): Input data, shape (batch x channels x time).
-    - Mdl (torch.nn.Module): The model containing the layer.
-    - layer (torch.nn.Module): The layer to extract FM from.
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - inout_labels (tuple): Labels for input and output conditions (e.g., class labels).
+    - inout_labels (list of lists): A list containing true and predicted labels for all the samples in input_window.
     - chan_ID (list): List of channel names to plot.
     - batch_ID (int): Index of the batch to analyze.
     - FM_ID (int or list, optional): IDs of feature maps to plot. Defaults to None (all FMs).
@@ -514,17 +557,20 @@ def temporalFM_PSD(input_window,
     --------
     - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
+
+    # Ensure that batch_ID is a scalar if it's provided as a list
+    batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
     
     # Prepare input data on CPU and select the batch data
-    input_window = input_window.cpu()
+    input_window = input_window
     input_window_batch = torch.squeeze(input_window[batch_ID])
     f_IN, Pxx_IN = get_Pxx(input_window_batch, spec_dict['srate'])
     f_indexIN = get_freq_index(f_IN, spec_dict['flim'])
     f_IN = f_IN[f_indexIN[0]:f_indexIN[1]]
-    Pxx_IN = 10*np.log10(Pxx_IN[f_indexIN[0]:f_indexIN[1]])
+    Pxx_IN = data_transform(Pxx_IN[f_indexIN[0]:f_indexIN[1]],spec_dict['lognorm'])
 
     # Retrieve model's output for the selected layer and move to CPU
-    convoluted_output = out_activation(Mdl, layer, input_window).cpu()
+    convoluted_output = out_activation(Mdl, layer, input_window)
     FM_indices = FM_ID if isinstance(FM_ID, list) else list(range(convoluted_output.shape[1]))
 
     # Prepare channel dictionary and figure
@@ -544,7 +590,7 @@ def temporalFM_PSD(input_window,
         f_FM, Pxx_FM = get_Pxx(torch.squeeze(FM), spec_dict['srate'])
         f_indexFM = get_freq_index(f_FM, spec_dict['flim'])
         f_FM = f_FM[f_indexFM[0]:f_indexFM[1]]
-        Pxx_FM = 10*np.log10(Pxx_FM[f_indexFM[0]:f_indexFM[1]])
+        Pxx_FM = data_transform(Pxx_FM[f_indexFM[0]:f_indexFM[1]],spec_dict['lognorm'])
 
         # Plot on corresponding subplot
         ax_to_plot = ax[i] if len(FM_indices) > 1 else ax
@@ -554,26 +600,34 @@ def temporalFM_PSD(input_window,
     return fig
 
 #### PLOT THE FM 1 LAYER IN THE FREQUENCY DOMAIN (SCALP) ####
-def temporalFM_PSDv2(input_window, Mdl, layer, spec_dict, inout_labels, batch_ID=0, FM_ID=None):
+def temporalFM_PSDv2(input_window, 
+                     Mdl, layer, 
+                     spec_dict, inout_labels,
+                     batch_ID, FM_ID=None):
     '''
     Plots the Power Spectral Density (PSD) of input versus the feature map (FM) extracted from a given model layer.
     This function visualizes PSD on scalp topographies for the specified frequency bands.
 
     Parameters:
     -----------
-    - input_window (torch.Tensor): The input signal, with dimensions (batch x channels x time).
-    - Mdl (torch.nn.Module): The neural network model containing the layer of interest.
-    - layer (torch.nn.Module): The model layer from which to extract feature maps.
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - inout_labels (tuple): Labels for input-output information (e.g., class labels).
-    - batch_ID (int): Index of the batch to visualize.
-    - FM_ID (int or list of int, optional): Feature map indices to visualize; defaults to all FMs.
+    - inout_labels (list of lists): A list containing true and predicted labels for all the samples in input_window.
+    - batch_ID (int): Index of the batch to analyze.
+    - FM_ID (int or list, optional): IDs of feature maps to plot. Defaults to None (all FMs).
 
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the PSD plots.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     '''
+
+    # Ensure that batch_ID is a scalar if it's provided as a list
+    batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
     
     # Get model activation output from the specified layer for the given input
     convoluted_output = out_activation(Mdl, layer, input_window)
@@ -615,7 +669,7 @@ def temporalFM_PSDv2(input_window, Mdl, layer, spec_dict, inout_labels, batch_ID
 
             # Compute average PSD within the band range and convert to dB
             area = np.trapz(Pxx_FM[f_index[0]:f_index[1], :].T,dx=(f_FM[1]-f_FM[0]))
-            data_vector = 10*np.log10(area/(f_FM[f_index[1]]-f_FM[f_index[0]]))
+            data_vector = data_transform(area/(f_FM[f_index[1]]-f_FM[f_index[0]]),spec_dict['lognorm'])
 
             # Create an MNE Evoked object for plotting the topographic map
             evoked_data = mne.EvokedArray(data_vector[:, np.newaxis], info)
@@ -635,11 +689,12 @@ def temporalFM_PSDv2(input_window, Mdl, layer, spec_dict, inout_labels, batch_ID
             # Set up colorbar
             ax_current[1].tick_params(labelsize=spec_dict['font'] - 6)
             ax_current[1].set_yticks(np.linspace(lims[j, 0], lims[j, 1], spec_dict['cbartick']))
-            ax_current[1].set_title('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 4)
+            ax_current[1].set_title('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 4) #TO DO (UNIT BASED ON LOGNORM)
 
             # Set up topography
             ax_current[0].set_xticks([])
             ax_current[0].set_title(f'FM$_{{{fm_id}}}$: {band_name}', fontsize=spec_dict['font'])
+            
             for text in ax_current[0].texts:
                 text.set_fontsize(spec_dict['font'] - 8)
                 text.set_fontweight('bold')
@@ -671,7 +726,7 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
 
     Returns:
     --------
-    - ax (list): Updated axes with the Bode plots.
+    - ax (matplotlib.axes.Axes): The axes containing the plot.
     """
     
     # Define label based on training state (because a plot without a story is just a chart!)
@@ -687,7 +742,7 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
 
     # Plot magnitude response if specified
     if spec_dict['bodeplot'] in ['mag', 'both']:
-        ax[i].plot(f_hz, 10 * np.log10(np.abs(h) + np.finfo(float).eps), color=spec_dict['colors'][ind][0],
+        ax[i].plot(f_hz, data_transform(np.abs(h) + np.finfo(float).eps, spec_dict['lognorm']), color=spec_dict['colors'][ind][0],
                    linewidth=spec_dict['linew'], linestyle=spec_dict['linestyle'][ind])
         title = f"Filter$_{{{string}}}$"
         ax[i].set_title(
@@ -700,7 +755,7 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
         ax[i].set_xlabel('$f_{[Hz]}$', fontsize=spec_dict['font'] - 2)
         ax[i].tick_params(axis='both', labelsize=spec_dict['font'] - 4)
         ax[i].tick_params(axis='y', color='k', labelcolor='k')
-        ax[i].tick_params(axis='x', rotation=45)
+        ax[i].tick_params(axis='x', rotation=spec_dict['rotation'])
         ax[i].set_ylim((maxminv[0], 1.3 * maxminv[1]))  # Set y-axis limits for magnitude
         ax[i].set_axisbelow(True)  # Place grid below plot elements
         ax[i].set_xticks(list_ticks)
@@ -727,7 +782,7 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
         ax2.set_ylabel('Phase$_{[rad]}$', fontsize=spec_dict['font'] - 2, color=spec_dict['colors'][0][1])
         ax2.tick_params(axis='both', labelsize=spec_dict['font'] - 6)
         ax2.tick_params(axis='y', color='k', labelcolor='k')
-        ax2.tick_params(axis='x', rotation=45)
+        ax2.tick_params(axis='x', rotation=spec_dict['rotation'])
         ax2.set_ylim((maxminv[2], 1.3 * maxminv[3]))  # Set y-axis limits for phase
         ax2.set_axisbelow(True)
         ax2.set_xticks(list_ticks)
@@ -760,7 +815,7 @@ def BP_coefficients(kernel_weights, srate, flim):
 
 def BP_temporalkernels(Mdl_weights, layer, 
                        spec_dict,
-                       filter_ID=0, FM_ID=0, kernel_height=0, 
+                       filter_ID=None, kernel_ID=0, kernel_height=0, 
                        MdlBase_weights=None):
     """
     Plots Bode Plot responses of 1D temporal kernels for a specified layer in a model. 
@@ -768,13 +823,13 @@ def BP_temporalkernels(Mdl_weights, layer,
     
     Parameters:
     -----------
-    - Mdl_weights (dict): Dictionary containing model weights for all layers.
-    - layer (str): Name of the layer containing the temporal kernels.
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - filter_ID (int or list, optional): ID(s) of the filters to plot. 
-    If None, plots all filters in the layer (default is 0).
-    - FM_ID (int, optional): ID of the feature map within the kernel (default is 0).
+    - filter_ID (int or list, optional): ID(s) of the filters to plot. Defaults to None (all filters).
+    - kernel_ID (int, optional): ID of the kernel within the filter selected (default is 0).
     - kernel_height (int, optional): Height index within the kernel to select the relevant slice (default is 0).
     - MdlBase_weights (dict, optional): Dictionary of baseline (pre-training) weights for comparison, 
     if provided.
@@ -782,7 +837,7 @@ def BP_temporalkernels(Mdl_weights, layer,
     Returns:
     --------
     - fig (matplotlib.figure.Figure): Figure containing the Bode plots for selected filters.
-    - ax (np.array): Array of matplotlib axes containing the individual filter plots.
+    - ax (matplotlib.axes.Axes): The axes containing the plot.
     """
 
     # Load weights for specified layer and set up baseline weights if available
@@ -814,31 +869,31 @@ def BP_temporalkernels(Mdl_weights, layer,
 
     # Pre-scan each filter to find global magnitude and phase limits
     for f_id in filter_indices:
-        kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(FM_ID)).index_select(2, torch.tensor(kernel_height))
+        kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(kernel_ID)).index_select(2, torch.tensor(kernel_height))
         kernel_weights = np.squeeze(kernel_weights)
         h, angles, f_hz = BP_coefficients(kernel_weights, spec_dict['srate'], spec_dict['flim'])
         
         # Update global min/max values for magnitude and phase
-        min_h = min(min_h, np.min(10*np.log10(abs(h) + np.finfo(float).eps)))
-        max_h = max(max_h, np.max(10*np.log10(abs(h) + np.finfo(float).eps)))
+        min_h = min(min_h, np.min(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
+        max_h = max(max_h, np.max(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
         min_a = min(min_a, np.min(angles))
         max_a = max(max_a, np.max(angles))
     
     # Repeat baseline check if baseline weights are provided
     if base_weights is not None:
         for f_id in filter_indices:
-            basekernel_weights = base_weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(FM_ID)).index_select(2, torch.tensor(kernel_height))
+            basekernel_weights = base_weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(kernel_ID)).index_select(2, torch.tensor(kernel_height))
             basekernel_weights = np.squeeze(basekernel_weights)
             h, angles, f_hz = BP_coefficients(basekernel_weights, spec_dict['srate'], spec_dict['flim'])
 
-            min_h = min(min_h, np.min(10 * np.log10(abs(h) + np.finfo(float).eps)))
-            max_h = max(max_h, np.max(10 * np.log10(abs(h) + np.finfo(float).eps)))
+            min_h = min(min_h, np.min(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
+            max_h = max(max_h, np.max(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
             min_a = min(min_a, np.min(angles))
             max_a = max(max_a, np.max(angles))
 
     # Plot each filter’s Bode plot with the computed global min/max limits
     for i, f_id in enumerate(filter_indices):
-        kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(FM_ID)).index_select(2, torch.tensor(kernel_height))
+        kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(kernel_ID)).index_select(2, torch.tensor(kernel_height))
         kernel_weights = np.squeeze(kernel_weights)
         h, angles, f_hz = BP_coefficients(kernel_weights, spec_dict['srate'], spec_dict['flim'])
         
@@ -848,7 +903,7 @@ def BP_temporalkernels(Mdl_weights, layer,
                        
         # Plot for baseline weights if available
         if base_weights is not None:
-            basekernel_weights = base_weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(FM_ID)).index_select(2, torch.tensor(kernel_height))
+            basekernel_weights = base_weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(kernel_ID)).index_select(2, torch.tensor(kernel_height))
             basekernel_weights = np.squeeze(basekernel_weights)
             h, angles, f_hz = BP_coefficients(basekernel_weights, spec_dict['srate'], spec_dict['flim'])
             
@@ -863,7 +918,7 @@ def BP_temporalkernels(Mdl_weights, layer,
     return fig, ax
 
 #### STEM PLOT ####
-def weights_plot(gs, i, kernel_weights, fID_string, FM_ID, spec_dict):
+def weights_plot(gs, i, kernel_weights, fID_string, kernel_ID, spec_dict):
     """
     Creates a pair of plots for visualizing kernel weights: a stem plot and an image plot.
     
@@ -873,9 +928,13 @@ def weights_plot(gs, i, kernel_weights, fID_string, FM_ID, spec_dict):
     - i (int): The index of the current filter being plotted.
     - kernel_weights (torch.Tensor): The weights of the kernel to be plotted.
     - fID_string (str): A string identifier for the filter.
-    - FM_ID (int): The feature map index used in the kernel weights.
+    - kernel_ID (int): ID of the kernel within the filter selected.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
+
+    Returns:
+    --------
+    - None: The function modifies the provided axis `ax`.
     """
 
     # Create the stem plot for kernel weights
@@ -891,6 +950,7 @@ def weights_plot(gs, i, kernel_weights, fID_string, FM_ID, spec_dict):
 
     extended_lims = [spec_dict['vlim'][0] * 1.05 - spec_dict['vlim'][1] * 0.05, 
                      spec_dict['vlim'][1] * 1.05 - spec_dict['vlim'][0] * 0.05] #Extend the colorbar +- 5%
+    
     ax0.set_ylim(extended_lims[0],extended_lims[1])
     ax0.set_yticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['ytick']))
     ax0.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.2f}'))
@@ -905,7 +965,7 @@ def weights_plot(gs, i, kernel_weights, fID_string, FM_ID, spec_dict):
 
 def weights_temporalkernels(Mdl_weights, layer, 
                            spec_dict, 
-                           filter_ID=None, FM_ID=0, kernel_height=0):
+                           filter_ID=None, kernel_ID=0, kernel_height=0):
     """
     Visualizes the kernel weights of a specific layer in the model, with both stem plots 
     and heatmaps.
@@ -913,19 +973,18 @@ def weights_temporalkernels(Mdl_weights, layer,
     
     Parameters:
     -----------
-    - Mdl_weights (dict): Dictionary containing model weights for all layers.
-    - layer (str): Name of the layer whose kernel weights are to be visualized.
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - filter_ID (int or list, optional): Specific filter ID(s) to plot. 
-    If None, plots all filters in the layer (default is None).
-    - FM_ID (int, optional): The feature map ID for the kernel (default is 0).
-    - kernel_height (int, optional): The height index within the kernel to select the relevant slice. 
-    Default is 0.
+    - filter_ID (int or list, optional): ID(s) of the filters to plot. Defaults to None (all filters).
+    - kernel_ID (int, optional): ID of the kernel within the filter selected (default is 0).
+    - kernel_height (int, optional): Height index within the kernel to select the relevant slice (default is 0).
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the visualizations for the kernel weights.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
     
     # Retrieve the weights for the specified layer
@@ -949,9 +1008,9 @@ def weights_temporalkernels(Mdl_weights, layer,
     
     # Plot each filter's kernel weights
     for i, f_id in enumerate(filter_IDs):
-        kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(FM_ID))
+        kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(kernel_ID))
         fID_string = str(f_id)  # Convert filter ID to string for plotting
-        weights_plot(gs, i, kernel_weights, fID_string, FM_ID, spec_dict)
+        weights_plot(gs, i, kernel_weights, fID_string, kernel_ID, spec_dict)
  
     return fig
 
@@ -961,7 +1020,7 @@ def weights_temporalkernels(Mdl_weights, layer,
 def temporal_FM_PSD_layer2(input_window, 
                            Mdl, layer,
                            spec_dict, inout_labels,
-                           batch_ID=0, FM_ID=0):
+                           batch_ID, FM_ID=None):
     """
     Computes and visualizes the Power Spectral Density (PSD) of the feature maps of a specified 
     layer in the model for a given input window and batch index. 
@@ -970,22 +1029,25 @@ def temporal_FM_PSD_layer2(input_window,
     
     Parameters:
     -----------
-    - input_window (torch.Tensor): The input data window used for the model inference.
-    - Mdl (object): The trained model used for feature map extraction.
-    - layer (str): The name of the layer from which to extract the feature maps.
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - inout_labels (list of lists): A list containing two lists, 
-    one for the input labels and one for the output labels.
-    - batch_ID (int, optional): The batch index to visualize. Default is 0.
-    - FM_ID (int or list, optional): The specific feature map IDs to visualize. 
-    If None, visualizes all feature maps in the layer. Default is 0.
+    - inout_labels (list of lists): A list containing true and predicted labels for all the samples in input_window.
+    - batch_ID (int): Index of the batch to analyze.
+    - FM_ID (int or list, optional): IDs of feature maps to plot. Defaults to None (all FMs).
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the PSD heatmap plot.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
 
+    # Ensure that batch_ID is a scalar if it's provided as a list
+    batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
+    
     # Get the convoluted output from the model for the specified layer and input window
     convoluted_output = out_activation(Mdl, layer, input_window)
     
@@ -1019,12 +1081,12 @@ def temporal_FM_PSD_layer2(input_window,
     # Create the plot
     fig, ax = plt.subplots(1, 1, figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1]))  # Set figure size    
     # Plot the PSD using imshow (heatmap)
-    im = ax.imshow(10*np.log10(Pxx_tensor[:, f_index[0]:f_index[1]]), aspect='auto',
+    im = ax.imshow(data_transform(Pxx_tensor[:, f_index[0]:f_index[1]],spec_dict['lognorm']), aspect='auto',
                    cmap=spec_dict['cmap'], vmin=extended_lims[0], vmax=extended_lims[1])
 
     # Add colorbar to the plot
     cbar = fig.colorbar(im, ax=ax)
-    cbar.ax.set_ylabel('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 2)  # Set colorbar label
+    cbar.ax.set_ylabel('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 2)  # Set colorbar label [TO DO UNIT]
     cbar.ax.tick_params(labelsize=spec_dict['font'] - 4)  # Adjust colorbar tick size
     cbar.set_ticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['cbartick']))  # Set colorbar ticks
 
@@ -1035,7 +1097,7 @@ def temporal_FM_PSD_layer2(input_window,
     # Set x-axis ticks and labels based on frequency range
     ax.set_xticks(np.arange(f_index[0], f_index[1], spec_dict['groupby'][0]) - f_index[0])
     ax.set_xticklabels(np.round(f[f_index[0]:f_index[1]:spec_dict['groupby'][0]], 2), 
-                       rotation=45, fontsize=spec_dict['font'] - 4)
+                       rotation=spec_dict['rotation'], fontsize=spec_dict['font'] - 4)
     ax.set_xlabel('$f_{[Hz]}$', fontsize=spec_dict['font'] - 2)
 
     # Set y-axis ticks and labels for feature map IDs
@@ -1051,7 +1113,7 @@ def temporal_FM_PSD_layer2(input_window,
 ###################################
 ####    WEIGHTS FOR 2 LAYER     ###
 ###################################
-def get_weights(weights, filter_ID, FM_ID):
+def get_weights(weights, filter_ID, kernel_ID):
     """
     Extracts a subset of weights based on specified filter and feature map (FM) IDs.
 
@@ -1080,24 +1142,24 @@ def get_weights(weights, filter_ID, FM_ID):
     If both are `None`, the original `weights` tensor is returned without any modifications.
     """
     
-    if FM_ID is not None:
-        weights_sel = weights.index_select(0, torch.tensor(FM_ID))
-        
     if filter_ID is not None:
-        weights_sel = weights.index_select(1, torch.tensor(filter_ID))
+        weights_sel = weights.index_select(0, torch.tensor(filter_ID))
+        
+    if kernel_ID is not None:
+        weights_sel = weights.index_select(1, torch.tensor(kernel_ID))
 
-    if (FM_ID is None) and (filter_ID is None):
+    if (kernel_ID is None) and (filter_ID is None):
         weights_sel = weights.copy()
         
     return weights_sel
     
-def get_strings(filter_ID, FM_ID, i, j):
+def get_strings(filter_ID, kernel_ID, i, j):
     """
-    Generates a list of string representations for filter and feature map (FM) IDs based
+    Generates a list of string representations for filter and kernels IDs based
     on provided inputs.
 
     This function returns a list of two strings representing the filter ID and feature map ID.
-    The values are determined by the `filter_ID` and `FM_ID` inputs, 
+    The values are determined by the `filter_ID` and `kernel_ID` inputs, 
     or by the provided indices `i` and `j` if the IDs are not provided.
 
     Parameters:
@@ -1106,21 +1168,21 @@ def get_strings(filter_ID, FM_ID, i, j):
         - If `None`, the function uses the index `i` as the filter ID.
         - If an integer, it uses the value as the filter ID.
         - If a list or tuple, it uses the `i`-th element as the filter ID (if available).
-    - FM_ID (None, int, list, or tuple): 
-        - If `None`, the function uses the index `j` as the feature map (FM) ID.
-        - If an integer, it uses the value as the FM ID.
-        - If a list or tuple, it uses the `j`-th element as the FM ID (if available).
+    - kernel_ID (None, int, list, or tuple): 
+        - If `None`, the function uses the index `j` as the kernel ID.
+        - If an integer, it uses the value as the kernel ID.
+        - If a list or tuple, it uses the `j`-th element as the kernel ID (if available).
     - i (int): Index used for the filter ID if `filter_ID` is `None` or a list/tuple.
-    - j (int): Index used for the FM ID if `FM_ID` is `None` or a list/tuple.
+    - j (int): Index used for the kernel ID if `kernel_ID` is `None` or a list/tuple.
 
     Returns:
     -------
-    - list[str]: A list containing two strings: `[filter_ID_string, FM_ID_string]`.
+    - list[str]: A list containing two strings: `[filter_ID_string, kernel_ID_string]`.
     """
 
-    fID = str(filter_ID[i] if isinstance(filter_ID, (list, tuple)) else filter_ID) if filter_ID is not None else str(i)
-    fmID = str(FM_ID[j] if isinstance(FM_ID, (list, tuple)) else FM_ID) if FM_ID is not None else str(j)
-    return [fID, fmID]
+    fID  = str(filter_ID[i] if isinstance(filter_ID, (list, tuple)) else filter_ID) if filter_ID is not None else str(i)
+    kID = str(kernel_ID[j]  if isinstance(kernel_ID, (list, tuple)) else kernel_ID) if kernel_ID is not None else str(j)
+    return [fID, kID]
 
 def spatialkernels_plot(ax, ax_idx1, ax_idx2, evoked_data, spec_dict, string_ID):
     """
@@ -1142,8 +1204,8 @@ def spatialkernels_plot(ax, ax_idx1, ax_idx2, evoked_data, spec_dict, string_ID)
     It contains the data to be visualized.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - string_ID (list): A list containing the string representations of the filter and FM IDs 
-    (e.g., `['filter_ID', 'FM_ID']`).
+    - string_ID (list): A list containing the string representations of the filter and kernel IDs 
+    (e.g., `['filter_ID', 'kernel_ID']`).
 
     Returns:
     --------
@@ -1176,7 +1238,7 @@ def spatialkernels_plot(ax, ax_idx1, ax_idx2, evoked_data, spec_dict, string_ID)
 
 def spatialkernels_scalp(Mdl_weights, layer, 
                          spec_dict, 
-                         filter_ID=0, FM_ID=0, kernel_width=0, 
+                         filter_ID=0, kernel_ID=0, kernel_width=0, 
                          MdlBase_weights=None):
     """
     Visualizes the spatial kernels of a specific layer in a model, plotting the kernel weights 
@@ -1186,21 +1248,20 @@ def spatialkernels_scalp(Mdl_weights, layer,
     
     Parameters:
     -----------
-    - Mdl_weights (dict): A dictionary containing the model's weights, with layer names as keys.
-    - layer (str): The name of the layer whose kernel weights are to be visualized.
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
-    - filter_ID (int or list, optional): The ID(s) of the filters to visualize. 
-    Default is 0 (visualizes all filters if None).
-    - FM_ID (int, optional): The ID of the feature map within the kernel. Default is 0.
-    - kernel_width (int, optional): The height index of the kernel slice to visualize. 
-    Default is 0.
+    - filter_ID (int or list, optional): ID(s) of the filters to plot. Defaults to None (all filters).
+    - kernel_ID (int, optional): ID of the kernel within the filter selected (default is 0).
+    - kernel_width (int, optional): Width index within the kernel to select the relevant slice (default is 0).
     - MdlBase_weights (dict, optional): A dictionary containing the baseline (pre-training)
     model weights for comparison. Default is None.
     
     Returns:
     --------
-    fig (matplotlib.figure.Figure): The figure containing the visualizations of the spatial kernels.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
     
     info    = mne.create_info(ch_names=spec_dict['channels'], sfreq=spec_dict['srate'], ch_types='eeg')
@@ -1238,35 +1299,35 @@ def spatialkernels_scalp(Mdl_weights, layer,
         spec_dict['cmap'] = spec_dict['cmap'][1]
 
     # Select specific FM and filter if provided
-    weights = get_weights(weights, filter_ID, FM_ID)
+    weights = get_weights(weights, filter_ID, kernel_ID)
     
-    fm, filters, height, width = weights.shape
-    fig, ax = plt.subplots(filters, fm * 2, 
-                           figsize=(spec_dict['figdim'][0] * fm, spec_dict['figdim'][1] * filters),
-                           gridspec_kw={'width_ratios': [0.9, 0.1] * fm}, constrained_layout=True)
+    filters, kernels, height, width = weights.shape
+    fig, ax = plt.subplots(kernels, filters * 2, 
+                           figsize=(spec_dict['figdim'][0] * filters, spec_dict['figdim'][1] * kernels),
+                           gridspec_kw={'width_ratios': [0.9, 0.1] * filters}, constrained_layout=True)
     fig.suptitle(spec_dict['title'], fontsize=spec_dict['font'] + 2)
 
     # Plot the spatial kernels
-    for i in range(filters):
-        for j in range(fm):
-            data_vector = weights[j, i, :, kernel_width]
+    for j in range(kernels):
+        for i in range(filters):
+            data_vector = weights[i, j, :, kernel_width]
             evoked_data = mne.EvokedArray(data_vector[:, np.newaxis], info)
             evoked_data.set_montage(montage)
-            string_ID = get_strings(filter_ID, FM_ID, i, j)
+            string_ID = get_strings(filter_ID, kernel_ID, i, j)
 
-            if filters == 1 and fm > 1:
-                spatialkernels_plot(ax, [None, 2 * j], [None, 2 * j + 1], evoked_data, spec_dict, string_ID)
-            elif filters > 1 and fm == 1:
-                spatialkernels_plot(ax, [i, 0], [i, 1], evoked_data, spec_dict, string_ID)
+            if kernels == 1 and filters > 1:
+                spatialkernels_plot(ax, [None, 2 * i], [None, 2 * i + 1], evoked_data, spec_dict, string_ID)
+            elif kernels > 1 and filters == 1:
+                spatialkernels_plot(ax, [j, 0], [j, 1], evoked_data, spec_dict, string_ID)
             else:
-                spatialkernels_plot(ax, [i, 2 * j], [i, 2 * j + 1], evoked_data, spec_dict, string_ID)
+                spatialkernels_plot(ax, [j, 2 * i], [j, 2 * i + 1], evoked_data, spec_dict, string_ID)
 
     return fig
 
 ###################################
 ####   ACTIVATION FOR FLATTEN   ###
 ###################################
-def flatten_fm(input_window_normalized, 
+def flatten_fm(input_window, 
                Mdl, layer, 
                spec_dict, inout_labels, 
                batch_ID):
@@ -1278,67 +1339,58 @@ def flatten_fm(input_window_normalized,
     
     Parameters:
     -----------
-    - input_window_normalized (torch.Tensor): The normalized input data used for the model inference.
-    - Mdl (object): The trained model from which the feature map activations will be extracted.
-    - layer (str): The name of the layer from which to extract the feature map activations.
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
     - inout_labels (list of lists): A list containing two lists: one for the input labels and 
     one for the output labels.
-    - batch_ID (int or list, optional): The specific batch indices to visualize. 
-    If None, visualizes all batches in the input window. Default is None.
+    - batch_ID (int): Index of the batch to analyze.
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the feature map activations for 
-    the specified batches.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
 
     # Get the convoluted output (activations) from the specified layer of the model
-    convoluted_output = out_activation(Mdl, layer, input_window_normalized)
+    convoluted_output = out_activation(Mdl, layer, input_window)
 
     # Number of feature maps (neurons) in the layer
     neurons_feat = convoluted_output.shape[1]
     
-    # Determine the batch indices to visualize
-    if batch_ID is None:
-        batch = input_window_normalized.shape[0]
-        batch_IDs = range(batch)
-    else:
-        batch_IDs = batch_ID if isinstance(batch_ID, list) else [batch_ID]
-        batch = len(batch_IDs)
+    # Ensure that batch_ID is a scalar if it's provided as a list
+    batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
     
     # Set up the figure and axes for visualization
-    fig, ax = plt.subplots(batch, 1, figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1] * batch),
+    fig, ax = plt.subplots(1, 1, figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1]),
                                    constrained_layout=True)
-    ax = np.atleast_2d([ax])  # Ensure ax is at least 2D
     
-    # Loop through each batch ID and visualize its feature map activations
-    for i, batch_id in enumerate(batch_IDs):
-        # Get the activations for the current batch
-        batch_activ = convoluted_output.index_select(0, torch.tensor(batch_id)).numpy()
+    batch_activ = convoluted_output.index_select(0, torch.tensor(batch_ID)).numpy()
 
-        # Plot the activations for the current batch
-        ax[0, i].imshow(batch_activ, aspect='auto', cmap=spec_dict['cmap'], interpolation='nearest',
-                         vmin=spec_dict['vlim'][0], vmax=spec_dict['vlim'][1])
-        
-        # Set x-axis ticks and labels (showing feature map indices)
-        ax[0, i].set_xticks(np.arange(0, neurons_feat, spec_dict['groupby']))
-        ax[0, i].set_xticklabels(labels=['FM-' + str(j) for j in range(0, neurons_feat, spec_dict['groupby'])],
-                                 rotation=90, fontsize=spec_dict['font'] - 4)
-        
-        # Remove y-axis ticks (not needed for feature map visualization)
-        ax[0, i].set_yticks([])
-        
-        # Set the title of the plot with batch index and labels
-        ax[0, i].set_title(f'Batch Index: {batch_id}| {inout_labels[0][batch_id]} -> {inout_labels[1][batch_id]}',fontsize=spec_dict['font'])
-        
-        # Draw vertical lines between feature maps for visual clarity
-        for j in range(0, neurons_feat, 1):
-            ax[0, i].axvline(j - 0.5, color='k', linewidth=spec_dict['linew'], alpha=0.7)
+    # Plot the activations for the current batch
+    ax.imshow(batch_activ, aspect='auto', cmap=spec_dict['cmap'], interpolation='nearest',
+              vmin=spec_dict['vlim'][0], vmax=spec_dict['vlim'][1])
+    
+    # Set x-axis ticks and labels (showing feature map indices)
+    ax.set_xticks(np.arange(0, neurons_feat, spec_dict['groupby']))
+    ax.set_xticklabels(labels=['FM-' + str(j) for j in range(0, neurons_feat, spec_dict['groupby'])],
+                             rotation=spec_dict['rotation'], fontsize=spec_dict['font'] - 4)
+    
+    # Remove y-axis ticks (not needed for feature map visualization)
+    ax.set_yticks([])
+    
+    # Set the title of the plot with batch index and labels
+    ax.set_title(f'Batch Index: {batch_ID}| {inout_labels[0][batch_ID]} -> {inout_labels[1][batch_ID]}',fontsize=spec_dict['font'])
+    
+    # Draw vertical lines between feature maps for visual clarity
+    for j in range(0, neurons_feat, 1):
+        ax.axvline(j - 0.5, color='k', linewidth=spec_dict['linew'], alpha=0.7)
 
-        # Disable grid lines
-        ax[0, i].grid(False)
+    # Disable grid lines
+    ax.grid(False)
             
     return fig
 
@@ -1357,16 +1409,17 @@ def flattenCorrelationPSD(input_window,
 
     Parameters:
     -----------
-    - input_window (numpy.ndarray): A 3D array containing EEG data with shape 
-      (num_samples, num_channels, num_timepoints).
-    - Mdl (torch.nn.Module): The trained model.
-    - layer (str): The layer name of the model from which to extract activations.
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
+    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    with keys corresponding to layer names.
+    - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
 
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the scatter plots with regression lines.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
     
     # Extract the frequency band keys from the specification dictionary
@@ -1389,7 +1442,7 @@ def flattenCorrelationPSD(input_window,
             frange = (spec_dict['bands'][band_keys[j]][1] - spec_dict['bands'][band_keys[j]][0])
             # Compute the log10 of the average power in the current band using trapezoidal integration
             #bandc = spec_dict['norm']*np.log10(np.mean(np.trapz(Pxx[findex[0]:findex[1], :].T, dx=(f[1] - f[0])) / frange))
-            bandc = spec_dict['norm']*np.log10(np.mean(np.trapz(Pxx[findex[0]:findex[1], :].T, dx=(f[1] - f[0]))/1))
+            bandc = data_transform(np.mean(np.trapz(Pxx[findex[0]:findex[1], :].T, dx=(f[1] - f[0]))/1),spec_dict['lognorm'])
             band_content[i, j] = bandc
     
     # Get the model output from the specified layer
@@ -1453,8 +1506,8 @@ def flattenCorrelationPSD(input_window,
             pstring = f'={corr_pvalues[b]:.2f}'.split(".")[1]
         
         # Set the axis labels and title with the p-value and adjusted R-squared
-        axs[b].set_xlabel(f'Data: $\\mathcal{{F}}_X$$(${band_keys[b]}$)$'+f'${spec_dict['unit']}$', fontsize=spec_dict['font'] - 2)
-        axs[b].set_ylabel(f'Flatten Activation: $\\mathcal{{F}}$$(${band_keys[b]}$)$'+f'${spec_dict['unit']}$', fontsize=spec_dict['font'] - 2)
+        axs[b].set_xlabel(f'Data: $\\mathcal{{F}}_X$$(${band_keys[b]}$)$'+f'${spec_dict['unit']}$', fontsize=spec_dict['font'] - 2)   # TO DO
+        axs[b].set_ylabel(f'Flatten Activation: $\\mathcal{{F}}$$(${band_keys[b]}$)$'+f'${spec_dict['unit']}$', fontsize=spec_dict['font'] - 2) # TO DO
         title = f'$\\rho({len(x)-2})=.{f"{r_values[b]:.2f}".split(".")[1]},~p{pstring},~Adj.R^2=.{f"{adj_rvalues[b]:.2f}".split(".")[1]}$'
         axs[b].set_title(title, fontsize=spec_dict['font']-4)
         axs[b].legend(loc=spec_dict['loc'], fontsize=spec_dict['font'] - 6)
@@ -1483,8 +1536,7 @@ def denseweights_plot(Mdl_weights, layer,
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the visualizations of the weights
-    and the greatest weight class.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     - mask (np.ndarray): A mask indicating the class with the greatest weight for each neuron.
     """
     
@@ -1534,8 +1586,8 @@ def denseweights_plot(Mdl_weights, layer,
         
         # Set x-ticks for neuron IDs
         if spec_dict['xticks'] is None:
-            ax[0].set_xticks(np.arange(0, dense_neurons, 4))
-            ax[0].set_xticklabels(np.arange(0, dense_neurons, 4), fontsize=spec_dict['font'] - 4)
+            ax[0].set_xticks(np.arange(0, dense_neurons, spec_dict['groupby']))
+            ax[0].set_xticklabels(np.arange(0, dense_neurons, spec_dict['groupby']), fontsize=spec_dict['font'] - 4)
         else:
             ax[0].set_xticks(np.arange(0, len(spec_dict['xticks']), 1))
             ax[0].set_xticklabels(spec_dict['xticks'], fontsize=spec_dict['font'] - 4)
@@ -1574,8 +1626,8 @@ def denseweights_plot(Mdl_weights, layer,
             
             # Set x-ticks for the second plot
             if spec_dict['xticks'] is None:
-                ax[0].set_xticks(np.arange(0, dense_neurons, 4))
-                ax[0].set_xticklabels(np.arange(0, dense_neurons, 4), fontsize=spec_dict['font'] - 4)
+                ax[0].set_xticks(np.arange(0, dense_neurons, spec_dict['groupby']))
+                ax[0].set_xticklabels(np.arange(0, dense_neurons, spec_dict['groupby']), fontsize=spec_dict['font'] - 4)
             else:
                 ax[0].set_xticks(np.arange(0, len(spec_dict['xticks']), 1))
                 ax[0].set_xticklabels(spec_dict['xticks'], fontsize=spec_dict['font'] - 4)
@@ -1589,8 +1641,8 @@ def denseweights_plot(Mdl_weights, layer,
             
             # Set x-ticks for the second plot
             if spec_dict['xticks'] is None:
-                ax[1].set_xticks(np.arange(0, dense_neurons, 4))
-                ax[1].set_xticklabels(np.arange(0, dense_neurons, 4), fontsize=spec_dict['font'] - 4)
+                ax[1].set_xticks(np.arange(0, dense_neurons, spec_dict['groupby']))
+                ax[1].set_xticklabels(np.arange(0, dense_neurons, spec_dict['groupby']), fontsize=spec_dict['font'] - 4)
             else:
                 ax[1].set_xticks(np.arange(0, len(spec_dict['xticks']), 1))
                 ax[1].set_xticklabels(spec_dict['xticks'], fontsize=spec_dict['font'] - 4)
@@ -1621,7 +1673,7 @@ def embedding_split2D(embedding, labels,
 
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the plot.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     - ax (matplotlib.axes.Axes): The axes containing the plot.
     """
 
@@ -1689,7 +1741,8 @@ def embedding_split2D(embedding, labels,
 
     return fig, ax
 
-def embedding_split3D(embedding, labels, spec_dict):
+def embedding_split3D(embedding, labels, 
+                      spec_dict):
     """
     Visualizes a 3D embedding with scatter plots for selected data subsets 
     (TEST, VAL, and TRAIN).
@@ -1706,7 +1759,7 @@ def embedding_split3D(embedding, labels, spec_dict):
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the plot.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     - ax (matplotlib.axes.Axes): The axes containing the plot.
     - overlap (float): The overlap percentage between the two selected sets (TEST and VAL).
     """
@@ -1737,6 +1790,7 @@ def embedding_split3D(embedding, labels, spec_dict):
     xmin, xmax = np.inf, -np.inf
     ymin, ymax = np.inf, -np.inf
     zmin, zmax = np.inf, -np.inf
+    
     for i in range(len(spec_dict['sets'])):
         alpha   = spec_dict['alpha_trainval'] if spec_dict['sets'][i] != 'TEST' else spec_dict['alpha_test']
         size    = spec_dict['s_trainval']     if spec_dict['sets'][i] != 'TEST' else spec_dict['s_test']
@@ -1789,7 +1843,9 @@ def embedding_split3D(embedding, labels, spec_dict):
     return fig, ax, overlap
 
 #### EMBEDDING X LABELS: TRAIN-VALIDATION-TEST ####
-def embedding_labels2D(embedding, labels, spec_dict, ax=None):
+def embedding_labels2D(embedding, labels, 
+                       spec_dict, 
+                       ax=None):
     """
     Visualizes a 2D embedding of labeled data points. It includes the following:
     - Scatter plot of data points colored by their labels (optional: based on training or all data).
@@ -1809,7 +1865,7 @@ def embedding_labels2D(embedding, labels, spec_dict, ax=None):
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the plot.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     - ax (matplotlib.axes.Axes): The axes containing the plot.
     """
 
@@ -1906,7 +1962,8 @@ def embedding_labels2D(embedding, labels, spec_dict, ax=None):
     
     return fig, ax
 
-def embedding_labels3D(embedding, labels, spec_dict):
+def embedding_labels3D(embedding, labels, 
+                       spec_dict):
     """
     Visualizes a 3D embedding of labeled data points. It includes:
     - Scatter plot of data points colored by their labels (optional: based on training or all data).
@@ -1923,7 +1980,7 @@ def embedding_labels3D(embedding, labels, spec_dict):
     
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The figure containing the plot.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     - ax (matplotlib.axes.Axes): The axes containing the plot. 
     - baricenters (np.ndarray): An array containing the centroids (baricenters) for each class.
     - area (float): The area of the triangle with vertices the baricenters for each class.
@@ -2038,8 +2095,8 @@ def embedding_class2D(embedding, inout_labels,
 
     Returns:
     --------
-    - fig (matplotlib.figure.Figure or None): The figure containing the plot if created here.
-    - ax (matplotlib.axes.Axes): The axes with the plotted embedding.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
+    - ax (matplotlib.axes.Axes): The axes containing the plot.
     """
 
     # Check if the 'ax' (matplotlib axis) object is passed, if not create a new one.
@@ -2426,7 +2483,7 @@ def loss_curve(ax, acc, lims, spec_dict):
 
     Returns:
     --------
-    None: The function modifies the provided axis `ax` by plotting loss curves.
+    - None: The function modifies the provided axis `ax`.
     """
     
     # Set x-axis (epochs) and y-axis (loss) limits based on input limits and acc data
@@ -2543,7 +2600,7 @@ def overfitting_inspection(models, acc_train, acc_val, spec_dict):
 
     Returns:
     --------
-    - fig (matplotlib.figure.Figure): The generated figure containing the subplot mosaic.
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
     """
     
     # Define the subplot layout based on the number of models
