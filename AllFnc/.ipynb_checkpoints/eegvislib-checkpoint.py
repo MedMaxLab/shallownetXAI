@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 import mne
+import logging
 import seaborn as sns
 from scipy.stats import gaussian_kde, linregress, pearsonr, norm
 from scipy.signal import welch, freqz
@@ -456,10 +457,10 @@ def get_spec_dict(keys, values):
 ###################################
 ####    FUNCTIONS FOR INPUT     ###
 ###################################
-def scalp_plot(input_window, 
-               spec_dict,
-               inout_labels,
-               batch_ID):
+def scalpPSD_freq(input_window, 
+                  spec_dict,
+                  inout_labels,
+                  batch_ID):
     """
     Plot the 1-band scalp Power Spectral Density (PSD). This function plots the PSD for each frequency band
     specified in `spec_dict['f_des']` for the given `input_window`.
@@ -520,7 +521,7 @@ def scalp_plot(input_window,
     
         # Plot the topographic map and the colorbar for the current frequency band
         evoked_data.plot_topomap(show=False, axes=(ax[2 * j], ax[2 * j + 1]), show_names=True,
-                                 scalings=1, vlim=extended_lims(lims[j,:]), cmap=spec_dict['cmap'],
+                                 scalings=1, vlim=get_extended_lims(lims[j,:]), cmap=spec_dict['cmap'],
                                  contours=spec_dict['contours'])
 
         # Set up the colorbar
@@ -599,10 +600,10 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
     return ax
 
 #### PLOT THE FM 1 LAYER IN THE FREQUENCY DOMAIN (ELECTRODES) ####
-def temporalFM_PSD(input_window, 
-                   Mdl, layer,  
-                   spec_dict, inout_labels,
-                   chan_ID, batch_ID, FM_ID=None):
+def channelsPSD_lines(input_window, 
+                      Mdl, layer,  
+                      spec_dict, inout_labels,
+                      chan_ID, batch_ID, FM_ID=None):
     """
     Plot the Power Spectral Density (PSD) of input vs feature map (FM) from a model layer.
     This function compares the PSD of the input and feature map signals for specified channels.
@@ -668,10 +669,10 @@ def temporalFM_PSD(input_window,
     return fig
 
 #### PLOT THE FM 1 LAYER IN THE FREQUENCY DOMAIN (SCALP) ####
-def temporalFM_PSDv2(input_window, 
-                     Mdl, layer, 
-                     spec_dict, inout_labels,
-                     batch_ID, FM_ID=None):
+def scalpPSD_band(input_window,
+                  Mdl, layer,
+                  spec_dict, inout_labels,
+                  batch_ID, FM_ID=None):
     '''
     Plots the Power Spectral Density (PSD) of input versus the feature map (FM) extracted from a given model layer.
     This function visualizes PSD on scalp topographies for the specified frequency bands.
@@ -879,10 +880,10 @@ def BP_coefficients(kernel_weights, srate, flim):
     
     return h[f_index[0]:f_index[1]], angles[f_index[0]:f_index[1]], f_hz[f_index[0]:f_index[1]]
 
-def BP_temporalkernels(Mdl_weights, layer, 
-                       spec_dict,
-                       filter_ID=None, kernel_ID=0, kernel_height=0, 
-                       MdlBase_weights=None):
+def horizontalKernel1D_bode(Mdl_weights, layer, 
+                            spec_dict,
+                            filter_ID=None, kernel_ID=0, kernel_height=0,
+                            MdlBase_weights=None):
     """
     Plots Bode Plot responses of 1D temporal kernels for a specified layer in a model. 
     Each filter can optionally be compared to a baseline (pre-training) version.
@@ -986,51 +987,7 @@ def BP_temporalkernels(Mdl_weights, layer,
     return fig, ax
 
 #### STEM PLOT ####
-def weights_plot(gs, i, kernel_weights, fID_string, kernel_ID, spec_dict):
-    """
-    Creates a pair of plots for visualizing kernel weights: a stem plot and an image plot.
-    
-    Parameters:
-    -----------
-    - gs (gridspec.GridSpec): The grid specification for the figure layout.
-    - i (int): The index of the current filter being plotted.
-    - kernel_weights (torch.Tensor): The weights of the kernel to be plotted.
-    - fID_string (str): A string identifier for the filter.
-    - kernel_ID (int): ID of the kernel within the filter selected.
-    - spec_dict (dict): A dictionary containing various specification parameters 
-    and other plotting configurations.
-
-    Returns:
-    --------
-    - None: The function modifies the provided axis `ax`.
-    """
-
-    # Create the stem plot for kernel weights
-    ax0 = plt.subplot(gs[i * 2])
-    stem = ax0.stem(torch.squeeze(kernel_weights))  # Plot the kernel weights
-    stem.markerline.set_markersize(spec_dict['s'])  # Set marker size
-    ax0.set_title(f'Filter$_{{{fID_string}}}$', fontsize=spec_dict['font'], pad=2)  # Title with filter ID
-    
-    # Adjust x-axis ticks (empty by default)
-    ax0.set_xticks([]) if spec_dict['channels'] is None else ax0.set_xticks([])
-    ax0.set_ylabel('Kernel Weights')
-    ax0.set_xlabel('Kernel Length')
-
-    extended_lims = get_extended_lims(spec_dict['vlim']) 
-    
-    ax0.set_ylim(extended_lims[0],extended_lims[1])
-    ax0.set_yticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['ytick']))
-    ax0.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.2f}'))
-
-    # Create the imshow plot for kernel weights (2D representation)
-    ax1 = plt.subplot(gs[i * 2 + 1], sharex=ax0)
-    ax1.imshow(torch.squeeze(kernel_weights, dim=(0, 1)), cmap=spec_dict['cmap'], aspect='auto',
-               interpolation='nearest', vmin=spec_dict['vlim'][0], vmax=spec_dict['vlim'][1])  # 2D heatmap
-    ax1.set_xticks([])  # Hide x-ticks
-    ax1.set_yticks([])  # Hide y-ticks
-
-
-def weights_temporalkernels(Mdl_weights, layer,
+def horizontalKernel1D_stem(Mdl_weights, layer,
                             spec_dict, 
                             filter_ID=None, kernel_ID=0, kernel_height=0):
     """
@@ -1077,17 +1034,40 @@ def weights_temporalkernels(Mdl_weights, layer,
     for i, f_id in enumerate(filter_IDs):
         kernel_weights = weights.index_select(0, torch.tensor(f_id)).index_select(1, torch.tensor(kernel_ID))
         fID_string = str(f_id)  # Convert filter ID to string for plotting
-        weights_plot(gs, i, kernel_weights, fID_string, kernel_ID, spec_dict)
+        
+        # Create the stem plot for kernel weights
+        ax0 = plt.subplot(gs[i * 2])
+        stem = ax0.stem(torch.squeeze(kernel_weights))  # Plot the kernel weights
+        stem.markerline.set_markersize(spec_dict['s'])  # Set marker size
+        ax0.set_title(f'Filter$_{{{fID_string}}}$', fontsize=spec_dict['font'], pad=2)  # Title with filter ID
+        
+        # Adjust x-axis ticks (empty by default)
+        ax0.set_xticks([]) if spec_dict['channels'] is None else ax0.set_xticks([])
+        ax0.set_ylabel('Kernel Weights')
+        ax0.set_xlabel('Kernel Length')
+    
+        extended_lims = get_extended_lims(spec_dict['vlim']) 
+        
+        ax0.set_ylim(extended_lims[0],extended_lims[1])
+        ax0.set_yticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['ytick']))
+        ax0.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.2f}'))
+    
+        # Create the imshow plot for kernel weights (2D representation)
+        ax1 = plt.subplot(gs[i * 2 + 1], sharex=ax0)
+        ax1.imshow(torch.squeeze(kernel_weights, dim=(0, 1)), cmap=spec_dict['cmap'], aspect='auto',
+                   interpolation='nearest', vmin=spec_dict['vlim'][0], vmax=spec_dict['vlim'][1])  # 2D heatmap
+        ax1.set_xticks([])  # Hide x-ticks
+        ax1.set_yticks([])  # Hide y-ticks
  
     return fig
 
 ###################################
 ####   ACTIVATION FOR 2 LAYER   ###
 ###################################
-def temporal_FM_PSD_layer2(input_window, 
-                           Mdl, layer,
-                           spec_dict, inout_labels,
-                           batch_ID, FM_ID=None):
+def channelsPSD_box(input_window,
+                    Mdl, layer,
+                    spec_dict, inout_labels,
+                    batch_ID, FM_ID=None, chan_ID=None):
     """
     Computes and visualizes the Power Spectral Density (PSD) of the feature maps of a specified 
     layer in the model for a given input window and batch index. 
@@ -1116,28 +1096,85 @@ def temporal_FM_PSD_layer2(input_window,
     
     # Get the convoluted output from the model for the specified layer and input window
     convoluted_output = out_activation(Mdl, layer, input_window)
-    
+
+    batch, fm, chan, timestep = convoluted_output.shape
     # Determine which feature maps to visualize
     if FM_ID is None:
-        batch, fm, chan, timestep = convoluted_output.shape
         fm_IDs = range(fm)
     else:
         fm_IDs = FM_ID if isinstance(FM_ID, list) else [FM_ID]
         fm = len(fm_IDs)
+        
+    # Determine which channels to visualize
+    if chan_ID is None:
+        ch_IDs = range(chan)
+    else:
+        ch_IDs = chan_ID if isinstance(chan_ID, list) else [chan_ID]
+        chan = len(ch_IDs)
     
     # Get the PSD for the first feature map
     time_w = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1, torch.tensor(0)))
     f, Pxx = get_Pxx(time_w, spec_dict['srate'])
     
-    # Create a tensor to store PSD values for all selected feature maps
-    Pxx_tensor = np.zeros((fm, Pxx.shape[0]))
-    
     # Calculate and store the PSD for each feature map
-    for i, fm_id in enumerate(fm_IDs):
-        time_w = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1, torch.tensor(fm_id)))
-        f, Pxx = get_Pxx(time_w, spec_dict['srate'])
-        Pxx_tensor[i, :] = Pxx
+    if (fm==1) and (chan>1):
+    # Create a tensor to store PSD values for all selected channels
+        Pxx_tensor = np.zeros((chan, Pxx.shape[0]))
+        for i, ch_id in enumerate(ch_IDs):
+            time_w = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1, torch.tensor(fm_IDs[0])).index_select(2, torch.tensor(ch_id)))
+            f, Pxx = get_Pxx(time_w, spec_dict['srate'])
+            Pxx_tensor[i, :] = Pxx
+            ytick = chan
+            if spec_dict['ytick'][1] is not None:
+                yticklabel_tick = [spec_dict['ytick'][1][x] for x in ch_IDs[::spec_dict['groupby'][1]]]
+            else:
+                yticklabel_tick = ch_IDs[::spec_dict['groupby'][1]]
+                
+            if spec_dict['ytick'][0] is not None:
+                ylabel = f'CH-ID: | FM-ID: {spec_dict['ytick'][0][fm_IDs[0]]}'
+            else:
+                ylabel = f'CH-ID: | FM-ID:{fm_IDs[0]}'
+            
+    elif (fm>1) and (chan==1):
+        # Create a tensor to store PSD values for all selected feature maps
+        Pxx_tensor = np.zeros((fm, Pxx.shape[0]))
+        for i, fm_id in enumerate(fm_IDs):
+            time_w = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1, torch.tensor(fm_id)).index_select(2, torch.tensor(ch_IDs[0])))
+            f, Pxx = get_Pxx(time_w, spec_dict['srate'])
+            Pxx_tensor[i, :] = Pxx
+            ytick = fm
+            if spec_dict['ytick'][0] is not None:
+                yticklabel_tick = [spec_dict['ytick'][0][x] for x in fm_IDs[::spec_dict['groupby'][1]]]
+            else:
+                yticklabel_tick = fm_IDs[::spec_dict['groupby'][1]]
 
+            if spec_dict['ytick'][1] is not None:
+                ylabel = f'CH-ID: {spec_dict['ytick'][1][ch_IDs[0]]} | FM-ID:'
+            else:
+                ylabel = f'CH-ID: {ch_IDs[0]} | FM-ID:'
+
+    elif (fm==1) and (chan==1):
+        Pxx_tensor = np.zeros((1, Pxx.shape[0]))
+        time_w = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1, torch.tensor(fm_IDs[0])).index_select(2, torch.tensor(ch_IDs[0])))
+        f, Pxx = get_Pxx(time_w, spec_dict['srate'])
+        Pxx_tensor[0, :] = Pxx
+        ytick = 1
+        yticklabel_tick = ''
+        if spec_dict['ytick'][1] is not None:
+            ylabel1 = f'CH-ID: {spec_dict['ytick'][1][ch_IDs[0]]}'
+        else:
+            ylabel1 = f'CH-ID: {ch_IDs[0]}'
+            
+        if spec_dict['ytick'][0] is not None:
+            ylabel2 = f'| FM-ID: {spec_dict['ytick'][0][fm_IDs[0]]}'
+        else:
+            ylabel2 = f'| FM-ID: {fm_IDs[0]}'
+
+        ylabel = ylabel1+ylabel2
+
+    else:
+        raise ValueError('Unsupported option of multiple channels and features')
+        
     # Get the frequency index based on the frequency limits
     f_index = get_freq_index(f, spec_dict['flim'])
 
@@ -1167,20 +1204,21 @@ def temporal_FM_PSD_layer2(input_window,
                        rotation=spec_dict['rotation'], fontsize=spec_dict['font'] - 4)
     ax.set_xlabel('$f_{[Hz]}$', fontsize=spec_dict['font'] - 2)
 
+
     # Set y-axis ticks and labels for feature map IDs
-    ax.set_yticks(np.arange(0, fm, spec_dict['groupby'][1]))
-    ax.set_yticklabels(fm_IDs[::spec_dict['groupby'][1]], fontsize=spec_dict['font'] - 4)
-    ax.set_ylabel('Feature Map ID', fontsize=spec_dict['font'] - 2)
+    ax.set_yticks(np.arange(0, ytick, spec_dict['groupby'][1]))
+    ax.set_yticklabels(yticklabel_tick, fontsize=spec_dict['font'] - 4)
+    ax.set_ylabel(ylabel, fontsize=spec_dict['font'] - 2)
     
     # Turn off the grid for the plot
     ax.grid(False)
     
     return fig
 
-def temporal_FM_layer2(input_window,
-                       Mdl, layer,
-                       spec_dict,
-                       batch_ID, FM_ID=None):
+def channelsTime(input_window,
+                 Mdl, layer,
+                 spec_dict,
+                 batch_ID, FM_ID=None):
     """
     This function processes a given input window through a model and specified layer, 
     generates the convoluted output, and plots the result using MNE's Raw data plot functionality.
@@ -1198,6 +1236,9 @@ def temporal_FM_layer2(input_window,
     Returns:
     --------
     - fig (matplotlib.figure.Figure): The figure containing the plots.
+
+    Note:
+    If layer is None, the input_window is plotted.
     """
     
     # Set the MNE backend for plotting to 'matplotlib' (avoids interactive browser-based plots)
@@ -1206,33 +1247,40 @@ def temporal_FM_layer2(input_window,
     
     # Ensure that batch_ID is a scalar if it's provided as a list (otherwise, use directly)
     batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
-    
-    # Get the convoluted output from the model for the specified layer and input window
-    convoluted_output = out_activation(Mdl, layer, input_window)
 
-    # Determine which feature maps to visualize
-    if FM_ID is None:
+    if layer is not None:
+        # Get the convoluted output from the model for the specified layer and input window
+        convoluted_output = out_activation(Mdl, layer, input_window)
+
+        # Determine which feature maps to visualize
         batch, fm, chan, timestep = convoluted_output.shape
-        fm_IDs = range(fm)
-    else:
-        fm_IDs = FM_ID if isinstance(FM_ID, list) else [FM_ID]
-        fm = len(fm_IDs)
-    
-    # Select the batch index and remove any extra dimensions (squeeze the tensor)
-    data = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1,torch.tensor(fm_IDs)))
-
-    # Generate FM names if not provided in spec_dict, otherwise use the ones from spec_dict
-    if spec_dict['FMnames'] is None:
-        FM_names = ['FM {}'.format(i) for i in fm_IDs]
-    else:
-        if len(spec_dict['FMnames'])==fm:
-            FM_names = spec_dict['FMnames']
+        if FM_ID is None:
+            fm_IDs = range(fm)
         else:
-            raise ValueError("Length of spec_dict['FMnames'] is not equal to the FM_ID selected.")
+            fm_IDs = FM_ID if isinstance(FM_ID, list) else [FM_ID]
+            fm = len(fm_IDs)
+        
+        # Select the batch index and remove any extra dimensions (squeeze the tensor)
+        data = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1,torch.tensor(fm_IDs)))
     
-    # Create MNE info structure for the raw data
-    info = mne.create_info(ch_names=FM_names, sfreq=spec_dict['srate'])
-    
+        # Generate FM names if not provided in spec_dict, otherwise use the ones from spec_dict
+        if spec_dict['FMnames'] is None:
+            FM_names = ['FM {}'.format(i) for i in fm_IDs]
+        else:
+            if (len(spec_dict['FMnames'])==fm) or (len(spec_dict['FMnames'])==chan):
+                FM_names = spec_dict['FMnames']
+            else:
+                raise ValueError("Length of spec_dict['FMnames'] is not equal to the FM_ID selected or to the number of channels.")
+        
+        # Create MNE info structure for the raw data
+        info = mne.create_info(ch_names=FM_names, sfreq=spec_dict['srate'])
+
+    else:
+        convoluted_output = input_window
+        # Select the batch index and remove any extra dimensions (squeeze the tensor)
+        data = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)))
+        info = mne.create_info(ch_names=spec_dict['channels'], sfreq=spec_dict['srate'])
+        
     # Create a RawArray object in MNE from the processed data
     raw = mne.io.RawArray(data.detach().numpy(), info)
     
@@ -1363,10 +1411,10 @@ def spatialkernels_plot(ax, ax_idx1, ax_idx2, evoked_data, spec_dict, string_ID)
     title = f"Filter$_{{{string_ID[0]}}}$, Input FM$_{{{string_ID[1]}}}$" if spec_dict['filternames'] is None else f"Scalp: {spec_dict['filternames'][int(ax_idx1[1] / 2)]}"
     axes1.set_title(title, fontsize=spec_dict['font'])
 
-def spatialkernels_scalp(Mdl_weights, layer, 
-                         spec_dict, 
-                         filter_ID=0, kernel_ID=0, kernel_width=0, 
-                         MdlBase_weights=None):
+def verticalKernel1D_scalp(Mdl_weights, layer, 
+                           spec_dict, 
+                           filter_ID=0, kernel_ID=0, kernel_width=0, 
+                           MdlBase_weights=None):
     """
     Visualizes the spatial kernels of a specific layer in a model, plotting the kernel weights 
     for each filter and feature map. 
