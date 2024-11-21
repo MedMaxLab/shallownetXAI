@@ -1,4 +1,4 @@
-name: torch
+name: shallownetXAI
 channels:
   - anaconda
   - pytorch
@@ -353,4 +353,4 @@ dependencies:
   - pip:
       - fsspec==2024.6.1
       - selfeeg==0.2.0
-prefix: /home/zanola/miniconda3/envs/torch
+prefix: /home/zanola/miniconda3/envs/shallownetXAI
