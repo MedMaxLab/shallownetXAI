@@ -74,6 +74,45 @@ def out_activation(model, target_layer, input_data):
 ###################################
 ####     EXTRACT PSD LIMITS     ###
 ###################################
+def get_PSDunit(norm, unit=None, power=False):
+    """
+    Returns the appropriate unit for Power Spectral Density (PSD) based on the normalization type.
+
+    Parameters:
+    -----------
+    - norm (str): The normalization type. Options are:
+        - 'log10': Returns the unit as 'dB/10'.
+        - '10log10': Returns the unit as 'dB'.
+        - 'linear': Returns the unit as 'muV^2/Hz'.
+    - unit (str, optional): Unit of the calculated quantity, used if passed and norm is linear. Default is None.
+    - power (logical, optional): If power was calculated (integral over PSD), change the unit to 'muV^2'. Default is False.
+
+    Returns:
+    --------
+    - unit (str): The unit of PSD corresponding to the specified normalization type.
+
+    Raises:
+    -------
+    ValueError: If norm is not one of 'log10', '10log10', or 'linear'.
+    """
+    
+    if norm == 'log10':
+        unit = '[dB/10]'
+    elif norm == '10log10':
+        unit = '[dB]'
+    elif norm == 'linear':
+        if unit is not None:
+            unit=unit
+        else:
+            if power:
+                unit = '[µV^2]'
+            else:
+                unit = '[µV^2/Hz]'
+    else:
+        raise ValueError("Invalid norm type. Expected 'log10', '10log10', or 'linear'.")
+
+    return unit
+    
 def data_transform(data, norm):
     """
     Transforms data based on a specified normalization type.
@@ -169,8 +208,8 @@ def get_vlim(input_tensor, sampling_rate, frequency_limits, norm):
                 local_min_psd = psd_values[freq_indices[0]]
         
         # Update the global PSD limits based on the local values
-        global_psd_max = max(global_psd_max, local_max_psd)
-        global_psd_min = min(global_psd_min, local_min_psd)
+        global_psd_max = np.max([global_psd_max, local_max_psd])
+        global_psd_min = np.min([global_psd_min, local_min_psd])
     
     # Convert the PSD limits
     psd_limits = (data_transform(global_psd_min, norm), data_transform(global_psd_max, norm))
@@ -216,7 +255,8 @@ def get_vlimscalp(full_batch_tensor, batch_tensor, sampling_rate, freq_range, nu
     if spec_dict['vlim'] == 'band':
         # Compute individual limits for each specified band across the full tensor
         for band_idx in range(num_bands):
-            psd_limits[band_idx, :] = get_vlim(full_batch_tensor, sampling_rate, spec_dict['bands'][band_keys[band_idx]], spec_dict['lognorm'])
+            freq_range = spec_dict['bands'][band_keys[band_idx]]
+            psd_limits[band_idx, :] = get_vlim(full_batch_tensor, sampling_rate, freq_range, spec_dict['lognorm'])
 
     elif spec_dict['vlim'] == 'all':
         # Calculate global PSD limits across the entire frequency range for all bands
@@ -234,6 +274,34 @@ def get_vlimscalp(full_batch_tensor, batch_tensor, sampling_rate, freq_range, nu
         raise("Colorbar normalization option, not implemented yet.")
         
     return psd_limits
+
+def get_extended_lims(lims, percentage=5):
+    """
+    Extends the limits symmetrically by a specified percentage.
+
+    Parameters:
+    -----------
+    lims : list or array-like
+        A list or array containing two values [min, max], representing the initial limits.
+    percentage : float, optional, default=5
+        The percentage by which to extend the limits symmetrically. A positive value increases 
+        the range, while a negative value decreases it.
+
+    Returns:
+    --------
+    list
+        A list containing the extended limits [new_min, new_max].
+
+    Example:
+    --------
+    >>> extended_lims([0, 10], percentage=10)
+    [-1.0, 11.0]
+    
+    This example extends the range [0, 10] by 10%, resulting in [-1.0, 11.0].
+    """
+    factor = 1 + percentage / 100
+    return [lims[0] * factor - lims[1] * (factor - 1), 
+            lims[1] * factor - lims[0] * (factor - 1)]
 
 ###################################
 ####     EXTRACT PSD VALUES     ###
@@ -449,19 +517,17 @@ def scalp_plot(input_window,
         data_vector = data_transform(Pxx[f_index[j], :],spec_dict['lognorm']).T
         evoked_data = mne.EvokedArray(data_vector[:, np.newaxis], info)
         evoked_data.set_montage(montage)
-
-        extended_lims = [lims[j, 0] * 1.05 - lims[j, 1] * 0.05, 
-                         lims[j, 1] * 1.05 - lims[j, 0] * 0.05] #Extend the colorbar +- 5%
     
         # Plot the topographic map and the colorbar for the current frequency band
         evoked_data.plot_topomap(show=False, axes=(ax[2 * j], ax[2 * j + 1]), show_names=True,
-                                 scalings=1, vlim=extended_lims, cmap=spec_dict['cmap'],
+                                 scalings=1, vlim=extended_lims(lims[j,:]), cmap=spec_dict['cmap'],
                                  contours=spec_dict['contours'])
 
         # Set up the colorbar
         ax[2 * j + 1].set_yticks(np.linspace(lims[j, 0], lims[j, 1], spec_dict['cbartick']))
         ax[2 * j + 1].tick_params(labelsize=spec_dict['font'] - 4)
-        ax[2 * j + 1].set_title('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 4) #TO DO (UNIT BASED ON LOGNORM)
+        unit = get_PSDunit(spec_dict['lognorm'], unit=None, power=False)
+        ax[2 * j + 1].set_title(f'PSD$_{{{unit}}}$', fontsize=spec_dict['font'] - 4)
 
         # Set up the topography
         ax[2 * j].set_title(f'{band_dict[j]} @{f[f_index[j]]:.1f}Hz', fontsize=spec_dict['font'])
@@ -510,7 +576,7 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
     for ch in chan:
         ax.plot(f_IN, Pxx_IN[:, ch_dict[ch]], linewidth=spec_dict['linew'], label=f'Input {ch}')
         ax.plot(f_FM, Pxx_FM[:, ch_dict[ch]], linewidth=spec_dict['linew'], label=f'$FM_{{{FM_string}}}$ {ch}')
-        mininv = min(mininv, np.min(Pxx_IN[:, ch_dict[ch]]), np.min(Pxx_FM[:, ch_dict[ch]]))
+        mininv = np.min([mininv, np.min(Pxx_IN[:, ch_dict[ch]]), np.min(Pxx_FM[:, ch_dict[ch]])])
 
     # Add frequency band boundaries and labels
     list_ticks = []
@@ -525,7 +591,9 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
     ax.set_xticks(sorted(set(list_ticks)))
     ax.set_title(f'$FM_{{{FM_string}}}$ | {s}', fontsize=spec_dict['font'])
     ax.set_xlabel('$f_{[Hz]}$', fontsize=spec_dict['font'] - 2)
-    ax.set_ylabel('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 2)
+
+    unit = get_PSDunit(spec_dict['lognorm'], unit=None, power=False)
+    ax.set_ylabel(f'PSD$_{{{unit}}}$', fontsize=spec_dict['font'] - 2)
     ax.legend(fontsize=spec_dict['font'] - 6, loc=spec_dict['loc'], bbox_to_anchor=(1.4, 1), borderaxespad=0.)
     ax.grid('both')
     return ax
@@ -543,7 +611,7 @@ def temporalFM_PSD(input_window,
     -----------
     - input_window (torch.Tensor): The input tensor containing the data,
     with dimensions [batch, 1, channels, timesteps].
-    - Mdl_weights (dict): A dictionary containing the model's weights, 
+    - Mdl (torch.nn.Module): The model to apply to the input window for generating convoluted output. 
     with keys corresponding to layer names.
     - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
@@ -612,8 +680,7 @@ def temporalFM_PSDv2(input_window,
     -----------
     - input_window (torch.Tensor): The input tensor containing the data,
     with dimensions [batch, 1, channels, timesteps].
-    - Mdl_weights (dict): A dictionary containing the model's weights, 
-    with keys corresponding to layer names.
+    - Mdl (torch.nn.Module): The model to apply to the input window for generating convoluted output.
     - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
@@ -677,19 +744,17 @@ def temporalFM_PSDv2(input_window,
 
             # Configure axis for topomap and colorbar
             ax_current = (ax[i, 2 * j], ax[i, 2 * j + 1]) if len(FM_indices) > 1 else (ax[2 * j], ax[2 * j + 1])
-
-            extended_lims = [lims[j, 0] * 1.05 - lims[j, 1] * 0.05, 
-                             lims[j, 1] * 1.05 - lims[j, 0] * 0.05] #Extend the colorbar +- 5%
             
             # Plot topomap of the PSD data on the scalp
             evoked_data.plot_topomap(show=False, axes=ax_current, show_names=True,
-                                     cmap=spec_dict['cmap'], scalings=1, vlim=extended_lims,
+                                     cmap=spec_dict['cmap'], scalings=1, vlim=get_extended_lims(lims[j,:]),
                                      contours=spec_dict['contours'])
             
             # Set up colorbar
             ax_current[1].tick_params(labelsize=spec_dict['font'] - 6)
             ax_current[1].set_yticks(np.linspace(lims[j, 0], lims[j, 1], spec_dict['cbartick']))
-            ax_current[1].set_title('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 4) #TO DO (UNIT BASED ON LOGNORM)
+            unit = get_PSDunit(spec_dict['lognorm'],unit=None,power=True)
+            ax_current[1].set_title(f'PSD$_{{{unit}}}$', fontsize=spec_dict['font'] - 4) #TO DO (UNIT BASED ON LOGNORM)
 
             # Set up topography
             ax_current[0].set_xticks([])
@@ -731,6 +796,7 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
     
     # Define label based on training state (because a plot without a story is just a chart!)
     label = 'After Train ' if ind == 0 else 'Before Train '
+    unit = get_PSDunit(spec_dict['lognorm'], unit='[]', power=False)
 
     # Define frequency band tick positions and vertical markers
     list_ticks = []
@@ -751,7 +817,7 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
         )
 
         # Configure magnitude axis labels and ticks
-        ax[i].set_ylabel('Magnitude$_{[dB]}$', fontsize=spec_dict['font'] - 2, color=spec_dict['colors'][0][0])
+        ax[i].set_ylabel(f'Magnitude$_{{{unit}}}$', fontsize=spec_dict['font'] - 2, color=spec_dict['colors'][0][0])
         ax[i].set_xlabel('$f_{[Hz]}$', fontsize=spec_dict['font'] - 2)
         ax[i].tick_params(axis='both', labelsize=spec_dict['font'] - 4)
         ax[i].tick_params(axis='y', color='k', labelcolor='k')
@@ -854,7 +920,9 @@ def BP_temporalkernels(Mdl_weights, layer,
 
     # Calculate figure layout dimensions
     nfig = int(np.ceil(np.sqrt(filters)))
-    fig, ax = plt.subplots(nfig-1, nfig+1, figsize=(spec_dict['figdim'][0]*(nfig+1), spec_dict['figdim'][1]*(nfig-1)), constrained_layout=True)
+    fig, ax = plt.subplots(nfig-1, nfig+1, 
+                           figsize=(spec_dict['figdim'][0]*(nfig+1), spec_dict['figdim'][1]*(nfig-1)),
+                           constrained_layout=True)
     fig.suptitle(spec_dict['title'], fontsize=spec_dict['font']+2)
     
     # Define legend elements for "before" and "after" training
@@ -874,10 +942,10 @@ def BP_temporalkernels(Mdl_weights, layer,
         h, angles, f_hz = BP_coefficients(kernel_weights, spec_dict['srate'], spec_dict['flim'])
         
         # Update global min/max values for magnitude and phase
-        min_h = min(min_h, np.min(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
-        max_h = max(max_h, np.max(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
-        min_a = min(min_a, np.min(angles))
-        max_a = max(max_a, np.max(angles))
+        min_h = np.min([min_h, np.min(data_transform(np.abs(h) + np.finfo(float).eps,spec_dict['lognorm']))])
+        max_h = np.max([max_h, np.max(data_transform(np.abs(h) + np.finfo(float).eps,spec_dict['lognorm']))])
+        min_a = np.min([min_a, np.min(angles)])
+        max_a = np.max([max_a, np.max(angles)])
     
     # Repeat baseline check if baseline weights are provided
     if base_weights is not None:
@@ -886,10 +954,10 @@ def BP_temporalkernels(Mdl_weights, layer,
             basekernel_weights = np.squeeze(basekernel_weights)
             h, angles, f_hz = BP_coefficients(basekernel_weights, spec_dict['srate'], spec_dict['flim'])
 
-            min_h = min(min_h, np.min(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
-            max_h = max(max_h, np.max(data_transform(abs(h) + np.finfo(float).eps,spec_dict['lognorm'])))
-            min_a = min(min_a, np.min(angles))
-            max_a = max(max_a, np.max(angles))
+            min_h = np.min([min_h, np.min(data_transform(np.abs(h) + np.finfo(float).eps,spec_dict['lognorm']))])
+            max_h = np.max([max_h, np.max(data_transform(np.abs(h) + np.finfo(float).eps,spec_dict['lognorm']))])
+            min_a = np.min([min_a, np.min(angles)])
+            max_a = np.max([max_a, np.max(angles)])
 
     # Plot each filter’s Bode plot with the computed global min/max limits
     for i, f_id in enumerate(filter_indices):
@@ -948,8 +1016,7 @@ def weights_plot(gs, i, kernel_weights, fID_string, kernel_ID, spec_dict):
     ax0.set_ylabel('Kernel Weights')
     ax0.set_xlabel('Kernel Length')
 
-    extended_lims = [spec_dict['vlim'][0] * 1.05 - spec_dict['vlim'][1] * 0.05, 
-                     spec_dict['vlim'][1] * 1.05 - spec_dict['vlim'][0] * 0.05] #Extend the colorbar +- 5%
+    extended_lims = get_extended_lims(spec_dict['vlim']) 
     
     ax0.set_ylim(extended_lims[0],extended_lims[1])
     ax0.set_yticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['ytick']))
@@ -963,9 +1030,9 @@ def weights_plot(gs, i, kernel_weights, fID_string, kernel_ID, spec_dict):
     ax1.set_yticks([])  # Hide y-ticks
 
 
-def weights_temporalkernels(Mdl_weights, layer, 
-                           spec_dict, 
-                           filter_ID=None, kernel_ID=0, kernel_height=0):
+def weights_temporalkernels(Mdl_weights, layer,
+                            spec_dict, 
+                            filter_ID=None, kernel_ID=0, kernel_height=0):
     """
     Visualizes the kernel weights of a specific layer in the model, with both stem plots 
     and heatmaps.
@@ -1031,8 +1098,7 @@ def temporal_FM_PSD_layer2(input_window,
     -----------
     - input_window (torch.Tensor): The input tensor containing the data,
     with dimensions [batch, 1, channels, timesteps].
-    - Mdl_weights (dict): A dictionary containing the model's weights, 
-    with keys corresponding to layer names.
+    - Mdl (torch.nn.Module): The model to apply to the input window for generating convoluted output.
     - layer (str): The name of the layer for which to plot the weights.
     - spec_dict (dict): A dictionary containing various specification parameters 
     and other plotting configurations.
@@ -1075,8 +1141,8 @@ def temporal_FM_PSD_layer2(input_window,
     # Get the frequency index based on the frequency limits
     f_index = get_freq_index(f, spec_dict['flim'])
 
-    extended_lims = [spec_dict['vlim'][0] * 1.05 - spec_dict['vlim'][1] * 0.05, 
-                     spec_dict['vlim'][1] * 1.05 - spec_dict['vlim'][0] * 0.05] #Extend the colorbar +- 5%
+    spec_dict['vlim'] = get_vlim(convoluted_output,spec_dict['srate'],spec_dict['flim'], spec_dict['lognorm'])
+    extended_lims = get_extended_lims(spec_dict['vlim'])
     
     # Create the plot
     fig, ax = plt.subplots(1, 1, figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1]))  # Set figure size    
@@ -1085,8 +1151,9 @@ def temporal_FM_PSD_layer2(input_window,
                    cmap=spec_dict['cmap'], vmin=extended_lims[0], vmax=extended_lims[1])
 
     # Add colorbar to the plot
+    unit = get_PSDunit(spec_dict['lognorm'], unit=None, power=False)
     cbar = fig.colorbar(im, ax=ax)
-    cbar.ax.set_ylabel('PSD$_{[dB]}$', fontsize=spec_dict['font'] - 2)  # Set colorbar label [TO DO UNIT]
+    cbar.ax.set_ylabel(f'PSD$_{{{unit}}}$', fontsize=spec_dict['font'] - 2)  # Set colorbar label [TO DO UNIT]
     cbar.ax.tick_params(labelsize=spec_dict['font'] - 4)  # Adjust colorbar tick size
     cbar.set_ticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['cbartick']))  # Set colorbar ticks
 
@@ -1096,7 +1163,7 @@ def temporal_FM_PSD_layer2(input_window,
     
     # Set x-axis ticks and labels based on frequency range
     ax.set_xticks(np.arange(f_index[0], f_index[1], spec_dict['groupby'][0]) - f_index[0])
-    ax.set_xticklabels(np.round(f[f_index[0]:f_index[1]:spec_dict['groupby'][0]], 2), 
+    ax.set_xticklabels([f"{value:.2f}" for value in f[f_index[0]:f_index[1]:spec_dict['groupby'][0]]], 
                        rotation=spec_dict['rotation'], fontsize=spec_dict['font'] - 4)
     ax.set_xlabel('$f_{[Hz]}$', fontsize=spec_dict['font'] - 2)
 
@@ -1110,6 +1177,70 @@ def temporal_FM_PSD_layer2(input_window,
     
     return fig
 
+def temporal_FM_layer2(input_window,
+                       Mdl, layer,
+                       spec_dict,
+                       batch_ID, FM_ID=None):
+    """
+    This function processes a given input window through a model and specified layer, 
+    generates the convoluted output, and plots the result using MNE's Raw data plot functionality.
+
+    Parameters:
+    -----------
+    - input_window (torch.Tensor): The input tensor containing the data,
+    with dimensions [batch, 1, channels, timesteps].
+    - Mdl (torch.nn.Module): The model to apply to the input window for generating convoluted output.
+    - layer (str): The name of the layer for which to plot the weights.
+    - spec_dict (dict): A dictionary containing various specification parameters 
+    and other plotting configurations.
+    - batch_ID (int): Index of the batch to analyze.
+    
+    Returns:
+    --------
+    - fig (matplotlib.figure.Figure): The figure containing the plots.
+    """
+    
+    # Set the MNE backend for plotting to 'matplotlib' (avoids interactive browser-based plots)
+    mne.viz.set_browser_backend(spec_dict['backend'])
+    logging.getLogger('mne').setLevel(logging.WARNING)
+    
+    # Ensure that batch_ID is a scalar if it's provided as a list (otherwise, use directly)
+    batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
+    
+    # Get the convoluted output from the model for the specified layer and input window
+    convoluted_output = out_activation(Mdl, layer, input_window)
+
+    # Determine which feature maps to visualize
+    if FM_ID is None:
+        batch, fm, chan, timestep = convoluted_output.shape
+        fm_IDs = range(fm)
+    else:
+        fm_IDs = FM_ID if isinstance(FM_ID, list) else [FM_ID]
+        fm = len(fm_IDs)
+    
+    # Select the batch index and remove any extra dimensions (squeeze the tensor)
+    data = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1,torch.tensor(fm_IDs)))
+
+    # Generate FM names if not provided in spec_dict, otherwise use the ones from spec_dict
+    if spec_dict['FMnames'] is None:
+        FM_names = ['FM {}'.format(i) for i in fm_IDs]
+    else:
+        if len(spec_dict['FMnames'])==fm:
+            FM_names = spec_dict['FMnames']
+        else:
+            raise ValueError("Length of spec_dict['FMnames'] is not equal to the FM_ID selected.")
+    
+    # Create MNE info structure for the raw data
+    info = mne.create_info(ch_names=FM_names, sfreq=spec_dict['srate'])
+    
+    # Create a RawArray object in MNE from the processed data
+    raw = mne.io.RawArray(data.detach().numpy(), info)
+    
+    # Generate the figure by plotting the raw data with automatic scaling
+    fig = raw.plot(scalings='auto', verbose=False)
+    
+    return fig
+    
 ###################################
 ####    WEIGHTS FOR 2 LAYER     ###
 ###################################
@@ -1214,15 +1345,11 @@ def spatialkernels_plot(ax, ax_idx1, ax_idx2, evoked_data, spec_dict, string_ID)
     
     axes1 = ax[ax_idx1[1]] if ax_idx1[0] is None else ax[ax_idx1[0], ax_idx1[1]]
     axes2 = ax[ax_idx2[1]] if ax_idx2[0] is None else ax[ax_idx2[0], ax_idx2[1]]
-
-    
-    extended_lims = [spec_dict['vlim'][0] * 1.05 - spec_dict['vlim'][1] * 0.05, 
-                     spec_dict['vlim'][1] * 1.05 - spec_dict['vlim'][0] * 0.05] #Extend the colorbar +- 5%
     
     # Plot the topomap
     evoked_data.plot_topomap(show=False, axes=(axes1, axes2), show_names=True, 
                              cmap=spec_dict['cmap'], cbar_fmt='%.1f', scalings=1,
-                             vlim=extended_lims, contours=spec_dict['contours'])
+                             vlim=get_extended_lims(spec_dict['vlim']), contours=spec_dict['contours'])
 
     # Adjust axes and labels
     axes2.set_yticks(np.linspace(spec_dict['vlim'][0], spec_dict['vlim'][1], spec_dict['cbartick']))
@@ -1275,7 +1402,7 @@ def spatialkernels_scalp(Mdl_weights, layer,
         if MdlBase_weights:
             baseweights = torch.softmax(MdlBase_weights[layer + '.weight'], -2)
             spec_dict['vlim'] = (spec_dict['min_softmax'], 
-                                 max(baseweights.max().item(), weights.max().item()))
+                                 np.max([baseweights.max().item(), weights.max().item()]))
         else:
             spec_dict['vlim'] = (spec_dict['min_softmax'], weights.max().item())
         spec_dict['cmap'] = spec_dict['cmap'][1]
@@ -1283,8 +1410,8 @@ def spatialkernels_scalp(Mdl_weights, layer,
     elif spec_dict['norm'] == 'nothing':
         if MdlBase_weights:
             baseweights = MdlBase_weights[layer + '.weight']
-            spec_dict['vlim'] = (min(baseweights.min().item(), weights.min().item()),
-                                 max(baseweights.max().item(), weights.max().item()))
+            spec_dict['vlim'] = (np.min([baseweights.min().item(), weights.min().item()]),
+                                 np.max([baseweights.max().item(), weights.max().item()]))
         else:
             spec_dict['vlim'] = (weights.min().item(), weights.max().item())
         spec_dict['cmap'] = spec_dict['cmap'][0]
@@ -1293,7 +1420,7 @@ def spatialkernels_scalp(Mdl_weights, layer,
         weights = torch.abs(weights)
         if MdlBase_weights:
             baseweights = torch.abs(MdlBase_weights[layer + '.weight'])
-            spec_dict['vlim'] = (0, max(baseweights.max().item(), weights.max().item()))
+            spec_dict['vlim'] = (0, np.max([baseweights.max().item(), weights.max().item()]))
         else:
             spec_dict['vlim'] = (0, weights.max().item())
         spec_dict['cmap'] = spec_dict['cmap'][1]
@@ -1357,6 +1484,8 @@ def flatten_fm(input_window,
 
     # Get the convoluted output (activations) from the specified layer of the model
     convoluted_output = out_activation(Mdl, layer, input_window)
+
+    spec_dict['vlim'] = (convoluted_output.min().numpy(),convoluted_output.max().numpy())
 
     # Number of feature maps (neurons) in the layer
     neurons_feat = convoluted_output.shape[1]
@@ -1444,7 +1573,8 @@ def flattenCorrelationPSD(input_window,
             #bandc = spec_dict['norm']*np.log10(np.mean(np.trapz(Pxx[findex[0]:findex[1], :].T, dx=(f[1] - f[0])) / frange))
             bandc = data_transform(np.mean(np.trapz(Pxx[findex[0]:findex[1], :].T, dx=(f[1] - f[0]))/1),spec_dict['lognorm'])
             band_content[i, j] = bandc
-    
+
+    unit = get_PSDunit(spec_dict['lognorm'], unit=None, power=True)
     # Get the model output from the specified layer
     layer = 'encoder'
     convoluted_output = out_activation(Mdl, layer, input_window)
@@ -1482,14 +1612,15 @@ def flattenCorrelationPSD(input_window,
         axs[b].tick_params(axis='x', labelsize=spec_dict['font'] - 4)
         axs[b].tick_params(axis='y', labelsize=spec_dict['font'] - 4)
         axs[b].scatter(x, y, s=spec_dict['s'], edgecolors='none')
-        axs[b].plot(x, slope * x + intercept, color='red', label=f"y={slope:.1f}x+{intercept:.1f}")
+        equation = f"y = {slope:.1f}x {'+' if intercept >= 0 else '-'} {abs(intercept):.1f}"
+        axs[b].plot(x, slope * x + intercept, color='red', label=equation)
 
         # Adjust the axis limits to provide some padding around the data
         range_x = [np.min(band_content), np.max(band_content)]
         range_y = [convoluted_output.min().numpy(), convoluted_output.max().numpy()]
         
-        range_x = [range_x[0] * 1.05 - range_x[1] * 0.05, range_x[1] * 1.05 - range_x[0] * 0.05]
-        range_y = [range_y[0] * 1.05 - range_y[1] * 0.05, range_y[1] * 1.05 - range_y[0] * 0.05]
+        range_x = get_extended_lims(range_x)
+        range_y = get_extended_lims(range_y)
         
         axs[b].set_xlim(range_x[0], range_x[1])
         axs[b].set_ylim(range_y[0], range_y[1])
@@ -1506,8 +1637,10 @@ def flattenCorrelationPSD(input_window,
             pstring = f'={corr_pvalues[b]:.2f}'.split(".")[1]
         
         # Set the axis labels and title with the p-value and adjusted R-squared
-        axs[b].set_xlabel(f'Data: $\\mathcal{{F}}_X$$(${band_keys[b]}$)$'+f'${spec_dict['unit']}$', fontsize=spec_dict['font'] - 2)   # TO DO
-        axs[b].set_ylabel(f'Flatten Activation: $\\mathcal{{F}}$$(${band_keys[b]}$)$'+f'${spec_dict['unit']}$', fontsize=spec_dict['font'] - 2) # TO DO
+        axs[b].set_xlabel(f'Data: $\\mathcal{{F}}_X$$(${band_keys[b]}$)$'+f'$~{unit}$', 
+                          fontsize=spec_dict['font'] - 2)
+        axs[b].set_ylabel(f'Flatten Activation: $\\mathcal{{F}}$$(${band_keys[b]}$)$'+f'$~{unit}$', 
+                          fontsize=spec_dict['font'] - 2)
         title = f'$\\rho({len(x)-2})=.{f"{r_values[b]:.2f}".split(".")[1]},~p{pstring},~Adj.R^2=.{f"{adj_rvalues[b]:.2f}".split(".")[1]}$'
         axs[b].set_title(title, fontsize=spec_dict['font']-4)
         axs[b].legend(loc=spec_dict['loc'], fontsize=spec_dict['font'] - 6)
@@ -1566,8 +1699,7 @@ def denseweights_plot(Mdl_weights, layer,
 
         symmetric_lim     = np.max([np.abs(weights.min().numpy()), np.abs(weights.max().numpy())])
         spec_dict['vlim'] = [-symmetric_lim, symmetric_lim]
-        extended_lims = [spec_dict['vlim'][0] * 1.05 - spec_dict['vlim'][1] * 0.05, 
-                         spec_dict['vlim'][1] * 1.05 - spec_dict['vlim'][0] * 0.05] #Extend the colorbar +- 5%
+        extended_lims = get_extended_lims(spec_dict['vlim'])
         
         # Plot the weights heatmap
         im = ax[0].imshow(weights, aspect='auto', cmap=spec_dict['cmap'], interpolation='nearest',
@@ -2347,9 +2479,9 @@ def get_triangle_area(vertices):
         # Extract vertices
         A, B, C = vertices
         # Calculate the area using the determinant formula
-        area = 0.5 * abs(A[0] * (B[1] - C[1]) +
-                         B[0] * (C[1] - A[1]) +
-                         C[0] * (A[1] - B[1]))
+        area = 0.5 * np.abs(A[0] * (B[1] - C[1]) +
+                            B[0] * (C[1] - A[1]) +
+                            C[0] * (A[1] - B[1]))
     elif vertices.shape[1] == 3:  # 3D case
         # Extract vertices
         A, B, C = vertices
@@ -2496,13 +2628,13 @@ def loss_curve(ax, acc, lims, spec_dict):
 
     # Automatically adjust xlim and ylim if they are not specified
     if xlim[1] is None:
-        xlim[1] = max(epoch_lengths)
+        xlim[1] = np.max(epoch_lengths)
     if xlim[0] is None:
-        xlim[0] = min(epoch_lengths)
+        xlim[0] = np.min(epoch_lengths)
     if ylim[1] is None:
-        ylim[1] = max(max_losses)
+        ylim[1] = np.max(max_losses)
     if ylim[0] is None:
-        ylim[0] = min(min_losses)
+        ylim[0] = np.min(min_losses)
 
     # Plot each loss curve with specified color and line width from spec_dict
     for run_loss in acc:
