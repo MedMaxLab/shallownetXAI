@@ -539,6 +539,129 @@ def scalpPSD_freq(input_window,
             
     return fig
 
+def scalpTime(input_window,
+              Mdl, layer,
+              spec_dict, inout_labels,
+              batch_ID, FM_ID):
+
+    # Ensure that batch_ID is a scalar if it's provided as a list
+    batch_ID = batch_ID[0] if isinstance(batch_ID, list) else batch_ID
+
+    if layer is None:
+        fm_IDs = [0]
+        fm = len(fm_IDs)
+    else:
+        if FM_ID is None:
+            fm_IDs = range(fm)
+        else:
+            fm_IDs = FM_ID if isinstance(FM_ID, list) else [FM_ID]
+            fm = len(fm_IDs)
+    
+    # Get model activation output from the specified layer for the given input
+    if layer is None:
+        batch, channels, time_steps = input_window.shape
+        # Select the batch slice to visualize
+        data_vector = torch.squeeze(input_window.index_select(0, torch.tensor(batch_ID))).numpy()
+    else:
+        convoluted_output = out_activation(Mdl, layer, input_window)
+        batch, num_fms, channels, time_steps = convoluted_output.shape
+
+
+    # Prepare 2x2 figure layout
+    lfig = len(spec_dict['times'])
+    fig, axs = plt.subplots(fm, lfig*2, figsize=((lfig-1)*2*spec_dict['figdim'][0], spec_dict['figdim'][1]*fm),
+                            gridspec_kw={'width_ratios': [0.9, 0.1] *lfig},
+                            constrained_layout=True)
+
+    axs = np.atleast_2d(axs)
+    
+    fig.suptitle(f'Batch Index: {batch_ID}| {inout_labels[0][batch_ID]} -> {inout_labels[1][batch_ID]}',
+                 fontsize=spec_dict['font'] + 2)
+    
+    for k, fm_id in enumerate(fm_IDs):
+        if layer is not None:
+            title_fm = f'$FM_{{{fm_id}}}$'
+            # Select the batch slice to visualize, check FM_ID to process either specific indices or all FMs
+            data_vector = torch.squeeze(convoluted_output.index_select(0, torch.tensor(batch_ID)).index_select(1, torch.tensor(fm_id))).numpy()
+        else:
+            title_fm = 'Input'
+                    
+        lims = np.min(data_vector), np.max(data_vector)
+        
+        info = mne.create_info(ch_names=spec_dict['channels'], sfreq=spec_dict['srate'], ch_types='eeg')
+        montage = mne.channels.make_standard_montage(spec_dict['montage'])
+        # Load EEG data (replace this with your data path)
+        evoked_data = mne.EvokedArray(data_vector, info)
+        evoked_data.set_montage(montage)
+
+        # Plot Topographies in the First Three Subplots
+        for i in range(lfig-1):
+            evoked_data.plot_topomap(spec_dict['times'][i], show=False, axes=(axs[k,2*i],axs[k,2*i+1]), show_names=True,
+                                     cmap=spec_dict['cmap'], scalings=1, vlim=get_extended_lims(lims),
+                                     contours=spec_dict['contours'])
+            
+            # Set up colorbar
+            axs[k,2*i+1].tick_params(labelsize=spec_dict['font'] - 6)
+            axs[k,2*i+1].set_yticks(np.linspace(lims[0], lims[1], spec_dict['cbartick']))
+            axs[k,2*i+1].set_title(spec_dict['unit'], fontsize=spec_dict['font'] - 4)
+            # Set up topography
+            axs[k,2*i+1].set_xticks([])
+        
+            # Access and modify the default title of the topography plot (for left subplot)
+            axs[k,2*i].set_title(title_fm + ' | Time: ' + axs[k,2*i].title.get_text(), fontsize=spec_dict['font'])  # Modify title font size
+            for text in axs[k,2*i].texts:
+                text.set_fontsize(spec_dict['font'] - 8)
+                text.set_fontweight('bold')
+        
+        # Compute and Plot Channel Correlation Matrix
+        # Calculate pairwise correlations
+        n_channels = data_vector.shape[0]
+        correlations = np.zeros((n_channels, n_channels))
+        p_values = np.ones((n_channels, n_channels))  # initialize p-values to 1
+        
+        # Initialize correlation and p-value matrices
+        correlations = np.zeros((n_channels, n_channels))
+        p_values = np.ones((n_channels, n_channels))  # initialize all p-values to 1
+        
+        # Compute correlations and p-values for each channel pair
+        for i in range(n_channels):
+            for j in range(i, n_channels):  # Use only upper triangle
+                corr, p_val = pearsonr(data_vector[i, :], data_vector[j, :])
+                correlations[i, j] = correlations[j, i] = corr
+                p_values[i, j] = p_values[j, i] = p_val
+        
+        # Apply FDR correction to the p-values
+        # Flatten the p-value matrix and apply FDR correction
+        p_values_flat = p_values[np.triu_indices(n_channels, k=1)]
+        _, p_values_corrected, _, _ = multitest.multipletests(p_values_flat, alpha=spec_dict['alpha'], method=spec_dict['method'])
+        
+        # Reconstruct the FDR-corrected p-value matrix
+        p_values_fdr = np.zeros((n_channels, n_channels))
+        p_values_fdr[np.triu_indices(n_channels, k=1)] = p_values_corrected
+        p_values_fdr = p_values_fdr + p_values_fdr.T
+        
+        # Mask insignificant correlations after FDR correction
+        significant_corr = np.where(p_values_fdr < spec_dict['alpha'], correlations, 0)
+        
+        # Plot significant correlations as a heatmap
+        im = axs[k,-2].imshow(significant_corr, cmap=spec_dict['cmap'], vmin=-1, vmax=1, 
+                              interpolation='nearest')
+        axs[k,-2].set_xticks(np.arange(0,len(spec_dict['channels']),1))
+        axs[k,-2].set_yticks(np.arange(0,len(spec_dict['channels']),1))
+        axs[k,-2].set_yticklabels(spec_dict['channels'],fontsize=spec_dict['font']-4)
+        axs[k,-2].set_xticklabels(spec_dict['channels'],fontsize=spec_dict['font']-4,rotation=spec_dict['rotation'])
+        axs[k,-2].set_title('Significant Correlations',fontsize=spec_dict['font']-2)
+        
+        # Set colorbar ticks and labels
+        cbar = fig.colorbar(im, ax=axs[k,-2], fraction=0.046, pad=0.04)
+        cbar.set_ticks(np.linspace(-1, 1, spec_dict['cbartick']))  # Set ticks on the colorbar
+        cbar.ax.tick_params(labelsize=spec_dict['font']-4)  # Set colorbar tick label font size
+        cbar.set_label('$\\rho$', fontsize=spec_dict['font']-2)  # Add label to colorbar
+            
+        fig.delaxes(axs[k,-1])
+    
+    return fig
+
 ###################################
 ####   ACTIVATION FOR 1 LAYER   ###
 ###################################
@@ -572,12 +695,24 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
     
     # Initialize minimum value across all channels for labeling
     mininv = np.inf
-    
-    # Plot PSD for each specified channel, updating minimum PSD value
+    # Update minimum PSD value
     for ch in chan:
-        ax.plot(f_IN, Pxx_IN[:, ch_dict[ch]], linewidth=spec_dict['linew'], label=f'Input {ch}')
-        ax.plot(f_FM, Pxx_FM[:, ch_dict[ch]], linewidth=spec_dict['linew'], label=f'$FM_{{{FM_string}}}$ {ch}')
-        mininv = np.min([mininv, np.min(Pxx_IN[:, ch_dict[ch]]), np.min(Pxx_FM[:, ch_dict[ch]])])
+        if spec_dict['typeplot'] == 'both':
+            mininv = np.min([mininv, np.min(Pxx_IN[:, ch_dict[ch]]), np.min(Pxx_FM[:, ch_dict[ch]])])
+        elif spec_dict['typeplot'] == 'input': 
+            mininv = np.min([mininv, np.min(Pxx_IN[:, ch_dict[ch]])])
+        elif spec_dict['typeplot'] == 'feature':
+            mininv = np.min([mininv, np.min(Pxx_FM[:, ch_dict[ch]])])
+        else:
+            raise ValueError('Unsupported typeplot.')
+
+    # Plot PSD for each specified channel
+    for ch in chan:
+        if (spec_dict['typeplot'] == 'input') or (spec_dict['typeplot'] == 'both'):
+            ax.plot(f_IN, Pxx_IN[:, ch_dict[ch]], linewidth=spec_dict['linew'], label=f'Input {ch}')
+            
+        if (spec_dict['typeplot'] == 'feature') or (spec_dict['typeplot'] == 'both'):
+            ax.plot(f_FM, Pxx_FM[:, ch_dict[ch]], linewidth=spec_dict['linew'], label=f'$FM_{{{FM_string}}}$ {ch}')
 
     # Add frequency band boundaries and labels
     list_ticks = []
@@ -587,7 +722,7 @@ def temporalFM_plot(ax, f_IN, Pxx_IN, f_FM, Pxx_FM, ch_dict, chan, FM_string, sp
         list_ticks.extend([f_min, f_max])
 
     # Customize ticks and labels
-    ax.tick_params(axis='x', rotation=45)
+    ax.tick_params(axis='x', rotation=spec_dict['rotation'])
     ax.tick_params(axis='both', labelsize=spec_dict['font'] - 4)
     ax.set_xticks(sorted(set(list_ticks)))
     ax.set_title(f'$FM_{{{FM_string}}}$ | {s}', fontsize=spec_dict['font'])
@@ -647,12 +782,12 @@ def channelsPSD_lines(input_window,
     fig, ax = plt.subplots(len(FM_indices), 1, 
                            figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1] * len(FM_indices)),
                            constrained_layout=True)
-    fig.suptitle(f'Batch Index: {batch_ID} | {inout_labels[0][batch_ID]} -> {inout_labels[1][batch_ID]}',
+    fig.suptitle(f'Batch Index: {batch_ID}| {inout_labels[0][batch_ID]} -> {inout_labels[1][batch_ID]}',
                  fontsize=spec_dict['font'] + 2)
 
     # Plot each FM
     for i, fm_id in enumerate(FM_indices):
-        FM = convoluted_output[batch_ID, fm_id]
+        FM = convoluted_output.index_select(0,torch.tensor(batch_ID)).index_select(1,torch.tensor(fm_id))
         FM_string = str(fm_id)
 
         # Extract and log-scale PSD for FM
@@ -713,7 +848,7 @@ def scalpPSD_band(input_window,
                            constrained_layout=True)
 
     # Set plot title with batch and label information
-    plt.suptitle(f'Batch Index: {batch_ID} | {inout_labels[0][batch_ID]} -> {inout_labels[1][batch_ID]}',
+    plt.suptitle(f'Batch Index: {batch_ID}| {inout_labels[0][batch_ID]} -> {inout_labels[1][batch_ID]}',
                  fontsize=spec_dict['font'] + 2)
 
     # Configure MNE information for plotting topographies
