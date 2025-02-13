@@ -977,10 +977,11 @@ def BP_plot(ax, i, h, angles, f_hz, spec_dict, string, maxminv, ind):
         
         # Set titles, labels, and ticks for phase plot
         title = f"Filter$_{{{string}}}$"
-        ax2.set_title(
-            title if spec_dict['filternames'] is None else f"{title}: {spec_dict['filternames'][i]}",
-            fontsize=spec_dict['font'] - 2
-        )
+        if spec_dict['bodeplot'] == 'phase':
+            ax2.set_title(
+                title if spec_dict['filternames'] is None else f"{title}: {spec_dict['filternames'][i]}",
+                fontsize=spec_dict['font'] - 2
+            )
         ax2.set_ylabel('Phase$_{[rad]}$', fontsize=spec_dict['font'] - 2, color=spec_dict['colors'][0][1])
         ax2.tick_params(axis='both', labelsize=spec_dict['font'] - 6)
         ax2.tick_params(axis='y', color='k', labelcolor='k')
@@ -1056,7 +1057,7 @@ def horizontalKernel1D_bode(Mdl_weights, layer,
 
     # Calculate figure layout dimensions
     nfig = int(np.ceil(np.sqrt(filters)))
-    fig, ax = plt.subplots(nfig-1, nfig+1, 
+    fig, ax = plt.subplots(nfig+1, nfig-1, 
                            figsize=(spec_dict['figdim'][0]*(nfig+1), spec_dict['figdim'][1]*(nfig-1)),
                            constrained_layout=True)
     fig.suptitle(spec_dict['title'], fontsize=spec_dict['font']+2)
@@ -2639,6 +2640,69 @@ def get_overlap3D(embedding, set1_index, set2_index, prob=0.6827, grid_size=100j
 
     return overlap
 
+def compute_ellipsoid_volume(data):
+    """
+    Computes the volume of the ellipsoid defined by the covariance matrix of the input data.
+
+    Parameters:
+    -----------
+    - data (np.ndarray): A 2D array of shape (n_samples, n_features) where rows represent samples 
+      and columns represent features.
+
+    Returns:
+    --------
+    - volume (float): The volume of the ellipsoid if all eigenvalues of the covariance matrix are positive.
+    - None: If the covariance matrix has any non-positive eigenvalues, indicating an invalid ellipsoid.
+    """
+    # Compute the covariance matrix of the input data
+    cov_matrix = np.cov(data)
+
+    # Compute the eigenvalues of the covariance matrix
+    eigenvalues, _ = np.linalg.eig(cov_matrix)
+
+    # Check if all eigenvalues are positive
+    if np.all(eigenvalues > 0):  
+        # Compute the ellipsoid volume using the eigenvalues
+        volume = (4 / 3) * np.pi * np.sqrt(np.prod(eigenvalues))
+        return volume
+    else:
+        return None
+
+
+def get_overlap3D_volume(embedding, set1_index, set2_index):
+    """
+    Computes the overlap between two subsets of 3D data points by calculating the normalized shared 
+    ellipsoid volume.
+
+    Parameters:
+    -----------
+    - embedding (np.ndarray): A 2D array of shape (n_samples, n_features) containing the input data.
+    - set1_index (tuple): A tuple of two integers (start, end) defining the range of rows in `embedding` 
+      that belong to the first subset.
+    - set2_index (tuple): A tuple of two integers (start, end) defining the range of rows in `embedding` 
+      that belong to the second subset.
+
+    Returns:
+    --------
+    - overlap (float): The normalized overlap between the two subsets, computed as:
+      (Volume of the union ellipsoid) / (Sum of individual ellipsoid volumes)^(1/3).
+    """
+    # Compute the volume of the ellipsoid for the first subset
+    volume_set1 = compute_ellipsoid_volume(embedding[set1_index[0]:set1_index[1], :].T)
+
+    # Compute the volume of the ellipsoid for the second subset
+    volume_set2 = compute_ellipsoid_volume(embedding[set2_index[0]:set2_index[1], :].T)
+
+    # Compute the volume of the combined subset (union of set1 and set2)
+    combined_data = np.concatenate([
+        embedding[set1_index[0]:set1_index[1], :],
+        embedding[set2_index[0]:set2_index[1], :]]).T
+    volume_set12 = compute_ellipsoid_volume(combined_data)
+
+    # Compute the overlap as the normalized shared ellipsoid volume
+    overlap = (volume_set12 / (volume_set1 + volume_set2)) ** (1 / 3)
+    return overlap
+    
 def get_triangle_area(vertices):
     """
     Calculates the area of a triangle in 2D or 3D space given its vertices.
@@ -2722,6 +2786,48 @@ def get_area3D(embedding, set_index, classlabels, labels):
     Area = get_triangle_area(baricenters)
     
     return Area
+
+def compute_centroid(matrix):
+    """
+    Compute the centroid (geometric center) of a set of points.
+
+    The centroid is calculated as the mean of all points along each dimension.
+    If the input matrix is empty, the function returns None.
+
+    Parameters:
+    -----------
+    - matrix (np.array): A 2D NumPy array where each row represents a point in space.
+
+    Returns:
+    --------
+    - centroid (np.array or None): A 1D NumPy array representing the centroid of the points.
+      Returns None if the input matrix is empty.
+    """
+    return np.mean(matrix, axis=0) if matrix.size > 0 else None
+
+def compute_mean_radius(points):
+    """
+    Compute the mean radius of a set of points relative to their centroid.
+
+    The mean radius is defined as the average Euclidean distance of each point 
+    from the centroid of the point cloud. If the set of points is empty, the function returns None.
+
+    Parameters:
+    -----------
+    - points (np.array): A 2D NumPy array where each row represents a point in space.
+
+    Returns:
+    --------
+    - mean_radius (float or None): The average distance of all points from the centroid.
+      Returns None if the input array is empty.
+    """
+    if points.size == 0:
+        return None  # If the point cloud is empty, we cannot compute the radius
+
+    centroid = np.mean(points, axis=0)  # Compute the centroid
+    distances = np.linalg.norm(points - centroid, axis=1)  # Compute distances from centroid
+    mean_radius = np.mean(distances)  # Compute mean radius
+    return mean_radius
 
 ###################################
 ####      OTHER UTILS FUNC      ###

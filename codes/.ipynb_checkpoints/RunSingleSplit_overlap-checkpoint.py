@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from scipy import signal
 from scipy.signal import welch, firwin
+from scipy.spatial.distance import euclidean
 
 # IMPORT TORCH
 import torch
@@ -1155,31 +1156,61 @@ if __name__ == '__main__':
     val_samples        = len(labels_val)
     train_samples      = len(labels_train)
     
+    embtest  = embeddingF[0:len(labels_test),:]
+    embval   = embeddingF[len(labels_test):(len(labels_test)+len(labels_val)),:]
+    embtrain = embeddingF[(len(labels_test)+len(labels_val)):,:]
+    
     # Constants and settings
-    prob = 0.6827
-    grid_size = 50j  # Grid resolution for KDE calculation
+    A_t = embtrain[[label == 'AD' for label in labels_train],:]
+    F_t = embtrain[[label == 'FTD' for label in labels_train],:]
+    C_t = embtrain[[label == 'CTL' for label in labels_train],:]
+    
+    A_v = embval[[label == 'AD' for label in labels_val],:]
+    F_v = embval[[label == 'FTD' for label in labels_val],:]
+    C_v = embval[[label == 'CTL' for label in labels_val],:]
+    
+    A_T = embtest[[label == 'AD' for label in labels_test],:]
+    F_T = embtest[[label == 'FTD' for label in labels_test],:]
+    C_T = embtest[[label == 'CTL' for label in labels_test],:]
 
-    # TRAIN - TEST
-    overlap_traintest = eegvislib.get_overlap3D(embeddingF, [test_samples + val_samples,-1], 
-                                                [0,test_samples],
-                                                prob=prob, grid_size=grid_size)
-
-    # TRAIN - VALIDATION
-    overlap_trainval  = eegvislib.get_overlap3D(embeddingF, [test_samples + val_samples,-1], 
-                                                [test_samples, test_samples + val_samples],
-                                                prob=prob, grid_size=grid_size)
-
-    # VALIDATION - TEST
-    overlap_valtest  = eegvislib.get_overlap3D(embeddingF, [test_samples, test_samples + val_samples], 
-                                                [0, test_samples],
-                                                prob=prob, grid_size=grid_size)
-
-    # CALCULATE AREA
-    area_train = eegvislib.get_area3D(embeddingF, [0,test_samples], classlabels, labels)
-    area_val   = eegvislib.get_area3D(embeddingF, [test_samples, test_samples + val_samples], classlabels, labels)
-    area_test  = eegvislib.get_area3D(embeddingF, [test_samples + val_samples,-1], classlabels, labels)
-
-    list_values = [overlap_traintest, overlap_trainval, overlap_valtest, area_train, area_val, area_test]
+    # Compute centroids
+    radius = {
+        'A_t': eegvislib.compute_mean_radius(A_t),
+        'F_t': eegvislib.compute_mean_radius(F_t),
+        'C_t': eegvislib.compute_mean_radius(C_t),
+        'A_v': eegvislib.compute_mean_radius(A_v),
+        'F_v': eegvislib.compute_mean_radius(F_v),
+        'C_v': eegvislib.compute_mean_radius(C_v),
+        'A_T': eegvislib.compute_mean_radius(A_T),
+        'F_T': eegvislib.compute_mean_radius(F_T),
+        'C_T': eegvislib.compute_mean_radius(C_T),
+    }
+    
+    # Compute centroids
+    centroids = {
+        'A_t': eegvislib.compute_centroid(A_t),
+        'F_t': eegvislib.compute_centroid(F_t),
+        'C_t': eegvislib.compute_centroid(C_t),
+        'A_v': eegvislib.compute_centroid(A_v),
+        'F_v': eegvislib.compute_centroid(F_v),
+        'C_v': eegvislib.compute_centroid(C_v),
+        'A_T': eegvislib.compute_centroid(A_T),
+        'F_T': eegvislib.compute_centroid(F_T),
+        'C_T': eegvislib.compute_centroid(C_T),
+    }
+    
+    # Compute pairwise Euclidean distances
+    pairwise_distances = {}
+    keys = list(centroids.keys())
+    
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):  # Avoid duplicate calculations
+            c1, c2 = centroids[keys[i]], centroids[keys[j]]
+            r1, r2 = radius[keys[i]], radius[keys[j]]
+            if c1 is not None and c2 is not None:  # Ensure valid centroids
+                pairwise_distances[(keys[i], keys[j])] = euclidean(c1, c2)/(r1+r2)
+                
+    list_values = pairwise_distances
     
     # Save the scores
     with open(results_path, 'wb') as handle:
