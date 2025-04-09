@@ -1594,10 +1594,11 @@ def verticalKernel1D_scalp(Mdl_weights, layer,
     elif spec_dict['norm'] == 'nothing':
         if MdlBase_weights:
             baseweights = MdlBase_weights[layer + '.weight']
-            spec_dict['vlim'] = (np.min([baseweights.min().item(), weights.min().item()]),
-                                 np.max([baseweights.max().item(), weights.max().item()]))
+            spec_dict['vlim'] = (np.min([baseweights.min().item(), weights.min().item(), spec_dict['vlim'][0]]),
+                                 np.max([baseweights.max().item(), weights.max().item(), spec_dict['vlim'][1]]))
         else:
-            spec_dict['vlim'] = (weights.min().item(), weights.max().item())
+            spec_dict['vlim'] = (np.min([weights.min().item(),spec_dict['vlim'][0]]), 
+                                 np.max([weights.max().item(),spec_dict['vlim'][1]]))
         spec_dict['cmap'] = spec_dict['cmap'][0]
         
     elif spec_dict['norm'] == 'abs':
@@ -1607,7 +1608,10 @@ def verticalKernel1D_scalp(Mdl_weights, layer,
             spec_dict['vlim'] = (0, np.max([baseweights.max().item(), weights.max().item()]))
         else:
             spec_dict['vlim'] = (0, weights.max().item())
-        spec_dict['cmap'] = spec_dict['cmap'][1]
+        spec_dict['cmap'] = spec_dict['cmap'][1] 
+        
+    else:
+        spec_dict['cmap'] = spec_dict['cmap'][0]
 
     # Select specific FM and filter if provided
     weights = get_weights(weights, filter_ID, kernel_ID)
@@ -3027,9 +3031,7 @@ def overfitting_inspection(models, acc_train, acc_val, spec_dict):
     # Define the subplot layout based on the number of models
     fig, axd = plt.subplot_mosaic(
         [['left'] + [f'center_{i}'] + [f'right_{i}'] for i in range(len(models))],
-        figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1]),
-        constrained_layout=True
-    )
+        figsize=(spec_dict['figdim'][0], spec_dict['figdim'][1]))
     
     # Initialize legend and set label display options
     spec_dict['xlabel'] = True
@@ -3052,5 +3054,6 @@ def overfitting_inspection(models, acc_train, acc_val, spec_dict):
         ax_pos = f'right_{idx}'
         spec_dict.update({'title': '' if idx != 0 else spec_dict['titlec']})
         _ = loss_correlation(axd[ax_pos], acc_train[model], acc_val[model], [spec_dict['xlimc'], spec_dict['ylimc']], spec_dict)
-    
+        
+    plt.tight_layout()
     return fig

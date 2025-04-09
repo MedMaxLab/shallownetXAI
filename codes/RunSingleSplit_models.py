@@ -1103,9 +1103,13 @@ if __name__ == '__main__':
     
     # Set the output path
     if taskToEval.casefold() == 'alzheimer':
-        start_piece_mdl = 'AlzClassification/Models/'
-        start_piece_res = 'AlzClassification/Results/'
+        #start_piece_mdl = 'AlzClassification/Models/'
+        #start_piece_res = 'AlzClassification/Results/'
         task_piece = 'alz'
+    elif taskToEval.casefold() == 'alzheimerca':
+        start_piece_mdl = 'AlzCAClassification/Models/'
+        start_piece_res = 'AlzCAClassification/Results/'
+        task_piece = 'alzca'
     elif taskToEval.casefold() == 'cognitive':
         start_piece_mdl = 'CognitiveClassification/Models/'
         start_piece_res = 'CognitiveClassification/Results/'

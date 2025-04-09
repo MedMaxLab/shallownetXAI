@@ -93,8 +93,9 @@ if __name__ == '__main__':
     PIPE_args = {
         "dataPath": ['/data/delpup/datasets/eegpickle/'],
         "pipelineToEval": ["filt"],
-        "taskToEval": ["alzheimer"],
-        "modelToEval": ["shn0","shn1","shn2","shn3","shn4","shn5","shn6127","shn6126","shn6119","shn698","shn663","shn628","shn67","shn7", "shn7db"],
+        "taskToEval": ["alzheimerca"],
+        "modelToEval": #["shn0","shn1","shn2","shn3","shn4","shn5","shn6127","shn6126","shn6119","shn698","shn663","shn628","shn67","shn7", "shn7db"],
+        ["shn0", "shn7db"],
         "downsample": [True],
         "z_score": [True],
         "rem_interp": [True],
@@ -106,8 +107,8 @@ if __name__ == '__main__':
         "lr": [5*10**(-5)],
         "subject": [False],
         "appleloss": [False],
-        "inner": [5], #[1,2,3,4,5],
-        "outer": [9] #[1,2,3,4,5,6,7,8,9,10]
+        "inner": [1,2,3,4,5],
+        "outer": [1,2,3,4,5,6,7,8,9,10]
     }
 
     # basically we overwrite the dataPath if something was given

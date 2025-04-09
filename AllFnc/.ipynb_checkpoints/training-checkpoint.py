@@ -419,7 +419,6 @@ def train_model(
         val_loss = 0
         train_loss_tot = 0
         val_loss_tot = 0
-
         if not (model.training):
             model.train()
         with tqdm.tqdm(
@@ -431,6 +430,10 @@ def train_model(
             unit=" Batch",
             file=sys.stdout,
         ) as pbar:
+
+            all_Yhat = []  # Will store predictions (Yhat) for each batch
+            all_Ytrue = []  # Will store true labels (Ytrue) for each batch
+
             for batch_idx, (X, Ytrue) in enumerate(train_dataloader):
 
                 optimizer.zero_grad()
@@ -481,6 +484,9 @@ def train_model(
                 Yhat = model(X)
                 train_loss = evaluate_loss(loss_func, [Yhat, Ytrue], loss_args)
 
+                all_Yhat.append(Yhat.detach().cpu())  # Detach and move to CPU (to avoid memory issues)
+                all_Ytrue.append(Ytrue.detach().cpu())  # Detach and move to CPU
+                
                 train_loss.backward()
                 optimizer.step()
                 train_loss_tot += train_loss.item()
@@ -494,6 +500,23 @@ def train_model(
                     pbar.update()
             train_loss_tot /= batch_idx + 1
 
+            # # At the end of the epoch, after accumulating all predictions and true labels:
+            # all_Yhat = torch.cat(all_Yhat, dim=0)  # (total_samples, num_classes)
+            # all_Ytrue = torch.cat(all_Ytrue, dim=0)  # (total_samples,)
+            
+            # # Get class predictions from Yhat (choose the class with the highest score)
+            # Yhat_classes = torch.argmax(all_Yhat, dim=1)  # (total_samples,)
+            
+            # # Compute balanced accuracy
+            # y_true_np = all_Ytrue.cpu().numpy()  # Move to CPU and convert to numpy
+            # y_pred_np = Yhat_classes.cpu().numpy()  # Move to CPU and convert to numpy
+            
+            # # Compute balanced accuracy score
+            # epoch_balanced_accuracy = balanced_accuracy_score(y_true_np, y_pred_np)
+            
+            # # Print final result for balanced accuracy at the end of the epoch
+            # print(f"Epoch {epoch}: Balanced Accuracy = {epoch_balanced_accuracy*100:.2f}%")
+            
             if lr_scheduler != None:
                 #lr_scheduler.step(val_loss) #CHANGED HERE
                 lr_scheduler.step()
@@ -573,7 +596,7 @@ def train_model(
                     return
 
         if return_loss_info:
-            loss_info[epoch] = [train_loss_tot, val_loss_tot]
+            loss_info[epoch] = [train_loss_tot, val_loss_tot] #, epoch_balanced_accuracy]
     if return_loss_info:
         return loss_info
 
