@@ -1056,9 +1056,8 @@ def horizontalKernel1D_bode(Mdl_weights, layer,
         filters = len(filter_indices)
 
     # Calculate figure layout dimensions
-    nfig = int(np.ceil(np.sqrt(filters)))
-    fig, ax = plt.subplots(nfig+1, nfig-1, 
-                           figsize=(spec_dict['figdim'][0]*(nfig+1), spec_dict['figdim'][1]*(nfig-1)),
+    fig, ax = plt.subplots(spec_dict['nfig'][0], spec_dict['nfig'][1], 
+                           figsize=(spec_dict['figdim'][0]*spec_dict['nfig'][1], spec_dict['figdim'][1]*spec_dict['nfig'][0]),
                            constrained_layout=True)
     fig.suptitle(spec_dict['title'], fontsize=spec_dict['font']+2)
     
@@ -1066,7 +1065,7 @@ def horizontalKernel1D_bode(Mdl_weights, layer,
     legend1_elements = [Line2D([0], [0], color='k', label='After Train',  linestyle=spec_dict['linestyle'][0]),
                         Line2D([0], [0], color='k', label='Before Train', linestyle=spec_dict['linestyle'][1])]
     
-    ax = np.array([ax]) if nfig == 1 else ax.flatten()
+    ax = np.array([ax]) if spec_dict['nfig'][0]*spec_dict['nfig'][1] == 1 else ax.flatten()
 
     # Initialize min/max values for magnitude and phase
     min_h, max_h = np.inf, -np.inf
@@ -1117,7 +1116,7 @@ def horizontalKernel1D_bode(Mdl_weights, layer,
             ax[i].legend(handles=legend1_elements, loc=spec_dict['loc'], fontsize=spec_dict['font'] - 6)
     
     # Remove unused axes in grid layout
-    for i in range(filters, int(nfig**2 - 1)):
+    for i in range(filters, spec_dict['nfig'][0]*spec_dict['nfig'][1]):
         fig.delaxes(ax[i])
     
     return fig, ax
