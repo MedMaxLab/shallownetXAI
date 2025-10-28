@@ -127,6 +127,8 @@ def loadEEG(path: str,
             chan2dele = [28, 30]
         elif data_id == 25:
             chan2dele = []
+        elif data_id == 26:
+            chan2dele = []    
         else:
             chan2dele = [ 1,  3,  5,  7,  9, 11, 13, 15, 17, 19, 21, 
                          23, 27, 29, 30, 32, 34, 36, 38, 40, 42, 44, 
